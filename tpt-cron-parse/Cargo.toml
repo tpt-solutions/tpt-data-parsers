@@ -1,0 +1,12 @@
+[package]
+name = "tpt-cron-parse"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Cron expression parser with precise error reporting and human-readable output"
+keywords = ["cron", "parser", "scheduler", "human-readable"]
+categories = ["parsing", "date-and-time"]
+readme = "README.md"

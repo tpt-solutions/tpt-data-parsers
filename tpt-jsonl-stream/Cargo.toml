@@ -1,0 +1,22 @@
+[package]
+name = "tpt-jsonl-stream"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Streaming, zero-allocation JSON Lines (.jsonl) parser"
+keywords = ["jsonl", "json-lines", "streaming", "parser", "zero-allocation"]
+categories = ["parsing", "encoding"]
+readme = "README.md"
+
+[dependencies]
+serde_json = { workspace = true }
+
+[features]
+simd = ["dep:simd-json"]
+
+[dependencies.simd-json]
+version = "0.13"
+optional = true

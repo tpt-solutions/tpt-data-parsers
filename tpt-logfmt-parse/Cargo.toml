@@ -1,0 +1,12 @@
+[package]
+name = "tpt-logfmt-parse"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Zero-copy, high-performance logfmt (key=value) parser with no dependencies"
+keywords = ["logfmt", "log", "parser", "structured-logging", "key-value"]
+categories = ["parsing", "development-tools::debugging"]
+readme = "README.md"

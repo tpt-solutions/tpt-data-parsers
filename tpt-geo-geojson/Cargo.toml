@@ -1,0 +1,16 @@
+[package]
+name = "tpt-geo-geojson"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Strict, validating GeoJSON parser with path-accurate error messages"
+keywords = ["geojson", "gis", "geo", "parser", "validation"]
+categories = ["parsing", "encoding", "science"]
+readme = "README.md"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
