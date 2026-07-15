@@ -74,13 +74,13 @@ impl<'a> LogfmtParser<'a> {
     }
 
     /// Parse a quoted string value, returning the content between the quotes.
-    /// Escape sequences `\"` and `\\` are supported; the returned slice is from
-    /// the raw input (no allocation) for non-escaped strings, but we fall back
-    /// to returning an empty slice on escape sequences to avoid allocation.
     ///
-    /// For simplicity and true zero-copy, escaped content is returned as a raw
-    /// slice that still contains backslashes — callers needing unescaped content
-    /// should use [`parse_to_map`] which allocates and resolves escapes.
+    /// The returned slice is borrowed directly from the raw input (true
+    /// zero-copy); escape sequences such as `\"` and `\\` are skipped over so
+    /// the slice's byte range encompasses the escaped characters, meaning the
+    /// returned `&str` may still contain literal backslashes. Callers needing
+    /// unescaped content should use [`parse_to_map`], which allocates and
+    /// resolves escape sequences.
     fn parse_quoted(&mut self) -> Result<&'a str, LogfmtError> {
         debug_assert_eq!(self.input.as_bytes()[self.pos], b'"');
         self.pos += 1; // consume opening quote
@@ -213,46 +213,35 @@ pub fn parse_to_map(input: &str) -> Result<HashMap<String, String>, LogfmtError>
                         message: "unterminated quoted string",
                     });
                 }
-                match input.as_bytes()[pos] {
-                    b'"' => {
-                        pos += 1;
-                        break;
+                let ch = input[pos..].chars().next().unwrap();
+                let ch_len = ch.len_utf8();
+                if ch == '"' {
+                    pos += ch_len;
+                    break;
+                } else if ch == '\\' {
+                    pos += ch_len;
+                    if pos >= input.len() {
+                        return Err(LogfmtError {
+                            position: pos,
+                            message: "unterminated escape sequence",
+                        });
                     }
-                    b'\\' => {
-                        pos += 1;
-                        if pos >= input.len() {
-                            return Err(LogfmtError {
-                                position: pos,
-                                message: "unterminated escape sequence",
-                            });
-                        }
-                        match input.as_bytes()[pos] {
-                            b'"' => {
-                                val.push('"');
-                                pos += 1;
-                            }
-                            b'\\' => {
-                                val.push('\\');
-                                pos += 1;
-                            }
-                            b'n' => {
-                                val.push('\n');
-                                pos += 1;
-                            }
-                            b't' => {
-                                val.push('\t');
-                                pos += 1;
-                            }
-                            other => {
-                                val.push(other as char);
-                                pos += 1;
-                            }
+                    let esc = input[pos..].chars().next().unwrap();
+                    let esc_len = esc.len_utf8();
+                    match esc {
+                        '"' => val.push('"'),
+                        '\\' => val.push('\\'),
+                        'n' => val.push('\n'),
+                        't' => val.push('\t'),
+                        other => {
+                            val.push('\\');
+                            val.push(other);
                         }
                     }
-                    b => {
-                        val.push(b as char);
-                        pos += 1;
-                    }
+                    pos += esc_len;
+                } else {
+                    val.push(ch);
+                    pos += ch_len;
                 }
             }
             val
@@ -336,5 +325,19 @@ mod tests {
         assert_eq!(map["level"], "error");
         assert_eq!(map["msg"], "disk full");
         assert_eq!(map["retries"], "3");
+    }
+
+    #[test]
+    fn parse_to_map_multibyte_utf8() {
+        let map = parse_to_map("msg=\"café ☕ résumé\"").unwrap();
+        assert_eq!(map["msg"], "café ☕ résumé");
+    }
+
+    #[test]
+    fn logfmt_parser_multibyte_utf8() {
+        let pairs: Vec<_> = LogfmtParser::new("msg=\"café ☕\"")
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(pairs[0], ("msg", "café ☕"));
     }
 }

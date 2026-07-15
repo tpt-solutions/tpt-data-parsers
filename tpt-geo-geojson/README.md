@@ -1,5 +1,8 @@
 # tpt-geo-geojson
 
+[![docs.rs](https://docs.rs/tpt-geo-geojson/badge.svg)](https://docs.rs/tpt-geo-geojson)
+[![crates.io](https://img.shields.io/crates/v/tpt-geo-geojson.svg)](https://crates.io/crates/tpt-geo-geojson)
+
 Strict, validating GeoJSON parser with path-accurate error messages.
 
 The existing `geojson` crate is good, but often lacks strict validation for malformed GIS data, which causes downstream mapping libraries to panic. This crate adds a second validation pass with precise error reporting.

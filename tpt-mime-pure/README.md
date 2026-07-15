@@ -1,5 +1,8 @@
 # tpt-mime-pure
 
+[![docs.rs](https://docs.rs/tpt-mime-pure/badge.svg)](https://docs.rs/tpt-mime-pure)
+[![crates.io](https://img.shields.io/crates/v/tpt-mime-pure.svg)](https://crates.io/crates/tpt-mime-pure)
+
 Pure Rust MIME type detection via magic bytes and file extension fallback. 100% `no_std` compatible.
 
 No OS calls, no shelling out to `file`. Works in minimal Docker containers, WASM, and embedded targets.
@@ -10,7 +13,7 @@ No OS calls, no shelling out to `file`. Works in minimal Docker containers, WASM
 - **Extension fallback** — `detect_by_extension("pdf")` for when you only have a filename
 - **`no_std` compatible** — works without the standard library (with `alloc`); disable the default `std` feature
 - **No dependencies** — zero external crates
-- **~20 common formats** — images, video, audio, archives, documents, binaries
+- **~28 common formats** — images, video, audio, archives, documents, binaries
 
 ## Usage
 
@@ -57,10 +60,15 @@ tpt-mime-pure = { version = "0.1", default-features = false }
 | `Bmp` | `image/bmp` | `42 4D` |
 | `Ico` | `image/x-icon` | `00 00 01 00` |
 | `Tiff` | `image/tiff` | II or MM header |
-| `Mp4` | `video/mp4` | ftyp at offset 4 |
-| `Mkv` | `video/x-matroska` | EBML `1A 45 DF A3` |
-| `WebM` | `video/webm` | EBML (same as MKV) |
+| `Mp4` | `video/mp4` | `ftyp` box at offset 4 (unknown brand) |
+| `QuickTime` | `video/quicktime` | `ftyp` brand `qt  ` |
+| `ThreeGp` | `video/3gpp` | `ftyp` brand `3gp4`/`3gp5`/`3gp6` |
+| `Mkv` | `video/x-matroska` | EBML `1A 45 DF A3`, DocType `matroska` |
+| `WebM` | `video/webm` | EBML `1A 45 DF A3`, DocType `webm` |
 | `Avi` | `video/x-msvideo` | RIFF + AVI |
+| `Heic` | `image/heic` | `ftyp` brand `heic`/`heix`/`hevc`/`hevx` |
+| `Heif` | `image/heif` | `ftyp` brand `mif1` |
+| `Avif` | `image/avif` | `ftyp` brand `avif`/`avis` |
 | `Mp3` | `audio/mpeg` | ID3 or FF FB |
 | `Wav` | `audio/wav` | RIFF + WAVE |
 | `Flac` | `audio/flac` | `fLaC` |

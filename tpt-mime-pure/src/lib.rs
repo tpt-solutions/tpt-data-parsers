@@ -30,12 +30,23 @@ pub enum MimeType {
     // Video
     /// `video/mp4`
     Mp4,
+    /// `video/quicktime` (MOV)
+    QuickTime,
+    /// `video/3gpp`
+    ThreeGp,
     /// `video/x-matroska`
     Mkv,
     /// `video/webm`
     WebM,
     /// `video/x-msvideo`
     Avi,
+    // Images (container formats sharing the ISO-BMFF `ftyp` box)
+    /// `image/heic`
+    Heic,
+    /// `image/heif`
+    Heif,
+    /// `image/avif`
+    Avif,
     // Audio
     /// `audio/mpeg`
     Mp3,
@@ -77,9 +88,14 @@ impl MimeType {
             Self::Ico => "image/x-icon",
             Self::Tiff => "image/tiff",
             Self::Mp4 => "video/mp4",
+            Self::QuickTime => "video/quicktime",
+            Self::ThreeGp => "video/3gpp",
             Self::Mkv => "video/x-matroska",
             Self::WebM => "video/webm",
             Self::Avi => "video/x-msvideo",
+            Self::Heic => "image/heic",
+            Self::Heif => "image/heif",
+            Self::Avif => "image/avif",
             Self::Mp3 => "audio/mpeg",
             Self::Wav => "audio/wav",
             Self::Flac => "audio/flac",
@@ -106,9 +122,14 @@ impl MimeType {
             Self::Ico => "ico",
             Self::Tiff => "tiff",
             Self::Mp4 => "mp4",
+            Self::QuickTime => "mov",
+            Self::ThreeGp => "3gp",
             Self::Mkv => "mkv",
             Self::WebM => "webm",
             Self::Avi => "avi",
+            Self::Heic => "heic",
+            Self::Heif => "heif",
+            Self::Avif => "avif",
             Self::Mp3 => "mp3",
             Self::Wav => "wav",
             Self::Flac => "flac",
@@ -216,14 +237,46 @@ pub fn detect(bytes: &[u8]) -> Option<MimeType> {
     if len >= 2 && b[0] == 0xFF && (b[1] == 0xFB || b[1] == 0xFA || b[1] == 0xF3 || b[1] == 0xF2) {
         return Some(MimeType::Mp3);
     }
-    // MKV / WebM: EBML magic 1A 45 DF A3
+    // MKV / WebM: EBML magic 1A 45 DF A3. Both share the same EBML header but
+    // declare a different DocType ("webm" vs "matroska"). Scan the leading bytes
+    // for the DocType element (id 0x42 0x82) and inspect its value.
     if starts_with!([0x1A, 0x45, 0xDF, 0xA3]) {
-        // WebM uses the same EBML header but declares DocType "webm" vs "matroska"
-        // Without reading further we default to Mkv; callers can disambiguate by extension
-        return Some(MimeType::Mkv);
+        let limit = len.min(512);
+        let mut idx = 0;
+        let mut kind = MimeType::Mkv;
+        while idx + 3 <= limit {
+            if b[idx] == 0x42 && b[idx + 1] == 0x82 {
+                let data_len = (b[idx + 2] & 0x7F) as usize;
+                if idx + 3 + data_len <= limit {
+                    let doc_type = &b[idx + 3..idx + 3 + data_len];
+                    if doc_type == b"webm" {
+                        kind = MimeType::WebM;
+                        break;
+                    } else if doc_type == b"matroska" {
+                        kind = MimeType::Mkv;
+                        break;
+                    }
+                }
+            }
+            idx += 1;
+        }
+        return Some(kind);
     }
-    // MP4: ftyp box at offset 4
+    // MP4 / MOV / 3GP / HEIC / HEIF / AVIF: ISO-BMFF `ftyp` box at offset 4.
+    // The 4-byte major-brand string at offset 8 distinguishes the variants;
+    // unknown brands fall back to MP4.
     if at_offset!(4, [0x66, 0x74, 0x79, 0x70]) {
+        if len >= 12 {
+            let brand = &b[8..12];
+            return Some(match brand {
+                b"heic" | b"heix" | b"hevc" | b"hevx" => MimeType::Heic,
+                b"mif1" => MimeType::Heif,
+                b"avif" | b"avis" => MimeType::Avif,
+                b"qt  " => MimeType::QuickTime,
+                b"3gp4" | b"3gp5" | b"3gp6" | b"3gr6" | b"3gs6" | b"3gpp" => MimeType::ThreeGp,
+                _ => MimeType::Mp4,
+            });
+        }
         return Some(MimeType::Mp4);
     }
     // WAV: RIFF at 0, WAVE at offset 8
@@ -300,8 +353,23 @@ pub fn detect_by_extension(ext: &str) -> Option<MimeType> {
     if eq("mp4") || eq("m4v") {
         return Some(MimeType::Mp4);
     }
+    if eq("mov") || eq("qt") {
+        return Some(MimeType::QuickTime);
+    }
+    if eq("3gp") || eq("3gpp") {
+        return Some(MimeType::ThreeGp);
+    }
     if eq("mkv") || eq("mk3d") {
         return Some(MimeType::Mkv);
+    }
+    if eq("heic") {
+        return Some(MimeType::Heic);
+    }
+    if eq("heif") {
+        return Some(MimeType::Heif);
+    }
+    if eq("avif") {
+        return Some(MimeType::Avif);
     }
     if eq("webm") {
         return Some(MimeType::WebM);
@@ -516,5 +584,88 @@ mod tests {
     #[test]
     fn tiff_be() {
         assert_eq!(detect(&[0x4D, 0x4D, 0x00, 0x2A]), Some(MimeType::Tiff));
+    }
+
+    #[test]
+    fn webm_via_ebml_doctype() {
+        let bytes = [
+            0x1A, 0x45, 0xDF, 0xA3, // EBML header id
+            0x8F, // size
+            0x42, 0x82, 0x84, b'w', b'e', b'b', b'm', 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
+        assert_eq!(detect(&bytes), Some(MimeType::WebM));
+    }
+
+    #[test]
+    fn mkv_via_ebml_doctype() {
+        let bytes = [
+            0x1A, 0x45, 0xDF, 0xA3, // EBML header id
+            0x8F, // size
+            0x42, 0x82, 0x88, b'm', b'a', b't', b'r', b'o', b's', b'k', b'a', 0, 0, 0, 0,
+        ];
+        assert_eq!(detect(&bytes), Some(MimeType::Mkv));
+    }
+
+    #[test]
+    fn heic_via_ftyp_brand() {
+        let bytes = [
+            0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70, b'h', b'e', b'i', b'c', 0x00, 0x00,
+            0x00, 0x00,
+        ];
+        assert_eq!(detect(&bytes), Some(MimeType::Heic));
+    }
+
+    #[test]
+    fn heif_via_ftyp_brand() {
+        let bytes = [
+            0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70, b'm', b'i', b'f', b'1', 0x00, 0x00,
+            0x00, 0x00,
+        ];
+        assert_eq!(detect(&bytes), Some(MimeType::Heif));
+    }
+
+    #[test]
+    fn avif_via_ftyp_brand() {
+        let bytes = [
+            0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70, b'a', b'v', b'i', b'f', 0x00, 0x00,
+            0x00, 0x00,
+        ];
+        assert_eq!(detect(&bytes), Some(MimeType::Avif));
+    }
+
+    #[test]
+    fn mov_via_ftyp_brand() {
+        let bytes = [
+            0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70, b'q', b't', b' ', b' ', 0x00, 0x00,
+            0x00, 0x00,
+        ];
+        assert_eq!(detect(&bytes), Some(MimeType::QuickTime));
+    }
+
+    #[test]
+    fn threegp_via_ftyp_brand() {
+        let bytes = [
+            0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70, b'3', b'g', b'p', b'4', 0x00, 0x00,
+            0x00, 0x00,
+        ];
+        assert_eq!(detect(&bytes), Some(MimeType::ThreeGp));
+    }
+
+    #[test]
+    fn mp4_fallback_for_unknown_brand() {
+        let bytes = [
+            0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70, b'i', b's', b'o', b'm', 0x00, 0x00,
+            0x00, 0x00,
+        ];
+        assert_eq!(detect(&bytes), Some(MimeType::Mp4));
+    }
+
+    #[test]
+    fn ext_new_variants() {
+        assert_eq!(detect_by_extension("heic"), Some(MimeType::Heic));
+        assert_eq!(detect_by_extension("heif"), Some(MimeType::Heif));
+        assert_eq!(detect_by_extension("avif"), Some(MimeType::Avif));
+        assert_eq!(detect_by_extension("mov"), Some(MimeType::QuickTime));
+        assert_eq!(detect_by_extension("3gp"), Some(MimeType::ThreeGp));
     }
 }

@@ -213,10 +213,19 @@ impl<'a> CronParser<'a> {
             self.pos += 1;
             CronField::Any
         } else {
+            let n_start = self.pos;
             let n = self.parse_u8(field)?;
             if self.pos < self.input.len() && self.input.as_bytes()[self.pos] == b'-' {
                 self.pos += 1;
                 let end = self.parse_u8(field)?;
+                if n > end {
+                    return Err(CronError {
+                        position: n_start,
+                        field,
+                        expected: "ascending range (start <= end)",
+                        found: Some('-'),
+                    });
+                }
                 CronField::Range(n, end)
             } else {
                 CronField::Value(n)
@@ -225,7 +234,16 @@ impl<'a> CronParser<'a> {
 
         if self.pos < self.input.len() && self.input.as_bytes()[self.pos] == b'/' {
             self.pos += 1;
+            let step_start = self.pos;
             let step = self.parse_u8(field)?;
+            if step == 0 {
+                return Err(CronError {
+                    position: step_start,
+                    field,
+                    expected: "non-zero step value",
+                    found: Some('0'),
+                });
+            }
             Ok(CronField::Step(Box::new(base), step))
         } else {
             Ok(base)
@@ -522,5 +540,23 @@ mod tests {
     fn noon() {
         let e = CronExpr::parse("0 12 * * *").unwrap();
         assert_eq!(e.to_human_readable(), "Every day at 12:00 PM");
+    }
+
+    #[test]
+    fn descending_range_rejected() {
+        let err = CronExpr::parse("0 9-5 * * *").unwrap_err();
+        assert_eq!(err.expected, "ascending range (start <= end)");
+    }
+
+    #[test]
+    fn zero_step_rejected() {
+        let err = CronExpr::parse("*/0 * * * *").unwrap_err();
+        assert_eq!(err.expected, "non-zero step value");
+    }
+
+    #[test]
+    fn valid_ascending_range_ok() {
+        let e = CronExpr::parse("0 5-9 * * *").unwrap();
+        assert_eq!(e.hours, CronField::Range(5, 9));
     }
 }

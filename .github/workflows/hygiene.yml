@@ -1,0 +1,29 @@
+name: Hygiene
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: No forbidden email domains
+        run: |
+          if grep -rI '@icb\.co\.nz' --include='*.toml' --include='*.rs' --include='*.md' .; then
+            echo "ERROR: forbidden email domain found in repository files"
+            exit 1
+          fi
+
+      - name: Cargo.toml authors must resolve to TPT Solutions
+        run: |
+          bad=$(grep -rEn '^authors' --include='*.toml' . \
+            | grep -vE 'authors\s*=\s*\{?\s*workspace' \
+            | grep -v 'TPT Solutions' || true)
+          if [ -n "$bad" ]; then
+            echo "ERROR: authors field must be 'TPT Solutions' or use workspace inheritance:"
+            echo "$bad"
+            exit 1
+          fi

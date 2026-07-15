@@ -112,14 +112,21 @@ impl<R: BufRead> Iterator for JsonlReader<R> {
                         let mut bytes = trimmed.as_bytes().to_vec();
                         match simd_json::from_slice(&mut bytes) {
                             Ok(v) => return Some(Ok(v)),
-                            Err(e) => {
-                                return Some(Err(JsonlError {
-                                    line: self.line,
-                                    kind: JsonlErrorKind::Json(
-                                        serde_json::from_str::<serde_json::Value>(trimmed)
-                                            .unwrap_err(),
-                                    ),
-                                }));
+                            Err(_) => {
+                                // simd-json failed. Re-derive an error and value from
+                                // serde_json so we never panic on parser divergence:
+                                // if serde_json also rejects the line we surface its
+                                // precise error; if it accepts the line (divergence)
+                                // we yield the parsed value rather than crashing.
+                                match serde_json::from_str::<serde_json::Value>(trimmed) {
+                                    Ok(v) => return Some(Ok(v)),
+                                    Err(e) => {
+                                        return Some(Err(JsonlError {
+                                            line: self.line,
+                                            kind: JsonlErrorKind::Json(e),
+                                        }));
+                                    }
+                                }
                             }
                         }
                     }

@@ -1,5 +1,8 @@
 # tpt-cron-parse
 
+[![docs.rs](https://docs.rs/tpt-cron-parse/badge.svg)](https://docs.rs/tpt-cron-parse)
+[![crates.io](https://img.shields.io/crates/v/tpt-cron-parse.svg)](https://crates.io/crates/tpt-cron-parse)
+
 Cron expression parser with precise error reporting and human-readable output. No dependencies.
 
 Supports standard 5-field and extended 6-field (with seconds) cron syntax.

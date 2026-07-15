@@ -9,13 +9,29 @@ designed to be dropped into a pipeline, a log shipper, or a constrained
 
 ## Crates
 
-| Crate | Description | crates.io |
-|-------|-------------|-----------|
-| [`tpt-jsonl-stream`](./tpt-jsonl-stream) | Streaming, zero-allocation JSON Lines parser | [![crates.io](https://img.shields.io/crates/v/tpt-jsonl-stream.svg)](https://crates.io/crates/tpt-jsonl-stream) |
-| [`tpt-geo-geojson`](./tpt-geo-geojson) | Strict, validating GeoJSON parser with line-numbered errors | [![crates.io](https://img.shields.io/crates/v/tpt-geo-geojson.svg)](https://crates.io/crates/tpt-geo-geojson) |
-| [`tpt-logfmt-parse`](./tpt-logfmt-parse) | Zero-copy logfmt (`key=value`) parser | [![crates.io](https://img.shields.io/crates/v/tpt-logfmt-parse.svg)](https://crates.io/crates/tpt-logfmt-parse) |
-| [`tpt-cron-parse`](./tpt-cron-parse) | Cron expression parser with human-readable output | [![crates.io](https://img.shields.io/crates/v/tpt-cron-parse.svg)](https://crates.io/crates/tpt-cron-parse) |
-| [`tpt-mime-pure`](./tpt-mime-pure) | Pure Rust MIME type detection via magic bytes (`no_std`) | [![crates.io](https://img.shields.io/crates/v/tpt-mime-pure.svg)](https://crates.io/crates/tpt-mime-pure) |
+| Crate | Description | crates.io | docs.rs |
+|-------|-------------|-----------|---------|
+| [`tpt-jsonl-stream`](./tpt-jsonl-stream) | Streaming, zero-allocation JSON Lines parser | [![crates.io](https://img.shields.io/crates/v/tpt-jsonl-stream.svg)](https://crates.io/crates/tpt-jsonl-stream) | [![docs.rs](https://docs.rs/tpt-jsonl-stream/badge.svg)](https://docs.rs/tpt-jsonl-stream) |
+| [`tpt-geo-geojson`](./tpt-geo-geojson) | Strict, validating GeoJSON parser with line-numbered errors | [![crates.io](https://img.shields.io/crates/v/tpt-geo-geojson.svg)](https://crates.io/crates/tpt-geo-geojson) | [![docs.rs](https://docs.rs/tpt-geo-geojson/badge.svg)](https://docs.rs/tpt-geo-geojson) |
+| [`tpt-logfmt-parse`](./tpt-logfmt-parse) | Zero-copy logfmt (`key=value`) parser | [![crates.io](https://img.shields.io/crates/v/tpt-logfmt-parse.svg)](https://crates.io/crates/tpt-logfmt-parse) | [![docs.rs](https://docs.rs/tpt-logfmt-parse/badge.svg)](https://docs.rs/tpt-logfmt-parse) |
+| [`tpt-cron-parse`](./tpt-cron-parse) | Cron expression parser with human-readable output | [![crates.io](https://img.shields.io/crates/v/tpt-cron-parse.svg)](https://crates.io/crates/tpt-cron-parse) | [![docs.rs](https://docs.rs/tpt-cron-parse/badge.svg)](https://docs.rs/tpt-cron-parse) |
+| [`tpt-mime-pure`](./tpt-mime-pure) | Pure Rust MIME type detection via magic bytes (`no_std`) | [![crates.io](https://img.shields.io/crates/v/tpt-mime-pure.svg)](https://crates.io/crates/tpt-mime-pure) | [![docs.rs](https://docs.rs/tpt-mime-pure/badge.svg)](https://docs.rs/tpt-mime-pure) |
+
+## Which crate do I need?
+
+- **I have newline-delimited JSON** (`.jsonl` / NDJSON) and want to iterate records without
+  loading everything into memory → **`tpt-jsonl-stream`**.
+- **I have GeoJSON** and need strict validation with precise error locations →
+  **`tpt-geo-geojson`**.
+- **I'm parsing structured logs** of the form `key=value key="quoted value"` →
+  **`tpt-logfmt-parse`**.
+- **I have a cron schedule string** and want a human-readable description or precise parse
+  errors → **`tpt-cron-parse`**.
+- **I need to identify a file's type** from its bytes or extension (no `file` binary) →
+  **`tpt-mime-pure`**.
+
+If you only have a filename/path rather than raw bytes, `tpt-mime-pure`'s
+`detect_by_extension` is the right tool. If you have raw bytes, use `detect`.
 
 ## Design principles
 
@@ -37,6 +53,10 @@ designed to be dropped into a pipeline, a log shipper, or a constrained
 - See [`AGENTS.md`](./AGENTS.md) for the exact verify/test/publish commands
   (`cargo fmt` / `cargo clippy -D warnings` / `cargo test`), and per-crate
   publishing on `v*.*.*` tags.
+- [`CONTRIBUTING.md`](./CONTRIBUTING.md) documents how to set up, the CI
+  sequence to run locally, and the project conventions.
+- Each crate ships a runnable example under its `examples/` directory (run with
+  `cargo run -p <crate> --example <name>`).
 
 ## License
 

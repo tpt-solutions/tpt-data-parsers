@@ -1,5 +1,8 @@
 # tpt-jsonl-stream
 
+[![docs.rs](https://docs.rs/tpt-jsonl-stream/badge.svg)](https://docs.rs/tpt-jsonl-stream)
+[![crates.io](https://img.shields.io/crates/v/tpt-jsonl-stream.svg)](https://crates.io/crates/tpt-jsonl-stream)
+
 Streaming, zero-allocation JSON Lines (`.jsonl`) parser for Rust.
 
 AI and data-engineering pipelines use massive JSONL files. Standard parsers load the whole file into RAM. This crate streams line-by-line from any [`BufRead`](https://doc.rust-lang.org/std/io/trait.BufRead.html).

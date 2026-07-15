@@ -1,5 +1,8 @@
 # tpt-logfmt-parse
 
+[![docs.rs](https://docs.rs/tpt-logfmt-parse/badge.svg)](https://docs.rs/tpt-logfmt-parse)
+[![crates.io](https://img.shields.io/crates/v/tpt-logfmt-parse.svg)](https://crates.io/crates/tpt-logfmt-parse)
+
 Zero-copy, high-performance [logfmt](https://brandur.org/logfmt) parser for Rust. No dependencies.
 
 Logfmt is the `key=value` structured logging format used by Heroku, Datadog agents, and many Go services.

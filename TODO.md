@@ -93,3 +93,34 @@
 - [x] Write `CHANGELOG.md` for each crate (0.1.0 entry)
 - [ ] Push to GitHub, verify CI passes
 - [ ] Tag `v0.1.0` to trigger publish
+
+## Phase 7: Pre-publish bug fixes (from platform review)
+- [x] `tpt-mime-pure`: inspect `ftyp` box brand string instead of always returning `Mp4` (fixes HEIC/HEIF/AVIF/MOV/3GP misdetection)
+- [x] `tpt-mime-pure`: distinguish WebM from MKV via EBML `DocType` element (currently WebM unreachable via `detect()`)
+- [x] `tpt-jsonl-stream`: stop swallowing the real `simd_json` error via `serde_json::from_str(...).unwrap_err()` re-derivation (panics on parser divergence)
+- [x] `tpt-geo-geojson`: fix panic risk in `Position::longitude()`/`latitude()` on user-constructed short vectors (private field + validating constructor, or bounds-check)
+- [x] `tpt-logfmt-parse`: fix stale doc comment claiming escape sequences fall back to empty slice (they don't)
+- [x] `tpt-logfmt-parse`: fix non-UTF-8-aware `byte as char` handling that mangles multi-byte UTF-8 content
+- [x] `tpt-cron-parse`: reject descending ranges (e.g. `5-1`) and zero step values (`*/0`) with a proper `CronError`
+
+## Phase 8: Git/repo reconciliation
+- [x] Review/merge remote PR #1 (`origin/claude/crates-io-readiness-ljshrm`) containing `hygiene.yml` and a repo-URL fix before pushing local `master`
+- [x] Remove duplicate tracked file `TODO 1260715.md`
+- [x] Delete or move stale `spec.txt` (superseded by README docs) into `docs/`
+
+## Phase 9: Adoption & usability improvements
+- [x] Add `examples/` directory with a runnable example per crate (crontab line, `.jsonl` stream, GeoJSON validation, logfmt line, file-type detection)
+- [x] Add a "which crate do I need" decision guide to root `README.md`
+- [x] Add docs.rs badges/links to root and per-crate READMEs
+- [x] Add MSRV (1.70) verification job to CI
+- [x] Add macOS to CI matrix
+- [x] Add `CONTRIBUTING.md`, issue templates, and PR template
+- [x] Add Dependabot/Renovate config for `serde`/`serde_json`/`simd-json`
+
+## Phase 10: v0.2.0 feature candidates (post-publish, non-blocking)
+- [ ] `tpt-cron-parse`: "next run time" computation (design decision needed re: time dependency)
+- [ ] `tpt-geo-geojson`: serialization back to valid GeoJSON text (fix `#[serde(tag = "type")]` round-trip gaps)
+- [ ] `tpt-geo-geojson`: `bbox` field support, foreign-member passthrough
+- [ ] `tpt-geo-geojson`: implement or remove unused `GeoErrorKind::InvalidCrs` variant
+- [ ] `tpt-jsonl-stream`: streaming writer (currently reader-only)
+- [ ] Evaluate optional serde support across crates whose output types lack it

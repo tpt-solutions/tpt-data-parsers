@@ -63,10 +63,28 @@ impl std::error::Error for GeoError {}
 /// A GeoJSON position: `[longitude, latitude]` or `[longitude, latitude, altitude]`.
 ///
 /// GeoJSON (RFC 7946) requires at least two elements; a third optional element is altitude.
+/// Construct via [`Position::new`] which validates the length, so [`Position::longitude`]
+/// and [`Position::latitude`] can never panic on a too-short vector.
 #[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct Position(pub Vec<f64>);
+pub struct Position(Vec<f64>);
 
 impl Position {
+    /// Construct a position, validating that `coords` has 2 or 3 elements.
+    ///
+    /// Returns a [`GeoErrorKind::MalformedCoordinates`] error otherwise.
+    pub fn new(coords: Vec<f64>) -> Result<Position, GeoError> {
+        if coords.len() < 2 || coords.len() > 3 {
+            return Err(GeoError {
+                kind: GeoErrorKind::MalformedCoordinates(format!(
+                    "position must have 2 or 3 elements, got {}",
+                    coords.len()
+                )),
+                path: String::new(),
+            });
+        }
+        Ok(Position(coords))
+    }
+
     /// Longitude (first element).
     pub fn longitude(&self) -> f64 {
         self.0[0]
@@ -392,7 +410,7 @@ fn parse_position(v: &Value, path: &str) -> Result<Position, GeoError> {
             })
         })
         .collect();
-    Ok(Position(coords?))
+    Position::new(coords?)
 }
 
 fn parse_position_array(v: &Value, path: &str) -> Result<Vec<Position>, GeoError> {
@@ -579,5 +597,14 @@ mod tests {
         let data = br#"{"type":"Point","coordinates":[1.0,2.0]}"#;
         let geo = parse_reader(data.as_slice()).unwrap();
         assert!(matches!(geo, GeoJson::Geometry(Geometry::Point { .. })));
+    }
+
+    #[test]
+    fn position_constructor_rejects_short_vector() {
+        assert!(Position::new(vec![1.0]).is_err());
+        let p = Position::new(vec![1.0, 2.0]).unwrap();
+        assert_eq!(p.longitude(), 1.0);
+        assert_eq!(p.latitude(), 2.0);
+        assert_eq!(p.altitude(), None);
     }
 }
