@@ -1,8 +1,10 @@
 #![doc = include_str!("../README.md")]
 #![warn(missing_docs)]
 
+use serde::ser::SerializeMap;
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::fmt;
 use std::io::Read;
 
@@ -17,8 +19,6 @@ pub enum GeoErrorKind {
     MalformedCoordinates(String),
     /// A polygon ring is not closed or has fewer than 4 positions.
     InvalidRing(String),
-    /// The optional `crs` field is malformed.
-    InvalidCrs(String),
     /// An I/O error reading the input.
     Io(std::io::Error),
     /// A JSON deserialization error.
@@ -31,7 +31,6 @@ impl fmt::Display for GeoErrorKind {
             Self::InvalidType(s) => write!(f, "invalid type: {}", s),
             Self::MalformedCoordinates(s) => write!(f, "malformed coordinates: {}", s),
             Self::InvalidRing(s) => write!(f, "invalid ring: {}", s),
-            Self::InvalidCrs(s) => write!(f, "invalid CRS: {}", s),
             Self::Io(e) => write!(f, "I/O error: {}", e),
             Self::Json(e) => write!(f, "JSON error: {}", e),
         }
@@ -145,7 +144,7 @@ pub enum Geometry {
 // ---- Feature types ----
 
 /// A GeoJSON Feature.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Feature {
     /// The feature's geometry, if any.
     pub geometry: Option<Geometry>,
@@ -153,17 +152,59 @@ pub struct Feature {
     pub properties: Option<Value>,
     /// An optional feature identifier.
     pub id: Option<Value>,
+    /// An optional bounding box `[west, south, east, north]` (plus optional altitude pairs).
+    pub bbox: Option<Vec<f64>>,
+    /// Non-standard members present on the feature, preserved across a serialize/parse round-trip.
+    pub foreign_members: HashMap<String, Value>,
+}
+
+impl Serialize for Feature {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut state = serializer.serialize_map(None)?;
+        state.serialize_entry("type", "Feature")?;
+        state.serialize_entry("geometry", &self.geometry)?;
+        state.serialize_entry("properties", &self.properties)?;
+        if let Some(id) = &self.id {
+            state.serialize_entry("id", id)?;
+        }
+        if let Some(bbox) = &self.bbox {
+            state.serialize_entry("bbox", bbox)?;
+        }
+        for (k, v) in &self.foreign_members {
+            state.serialize_entry(k, v)?;
+        }
+        state.end()
+    }
 }
 
 /// A GeoJSON FeatureCollection.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FeatureCollection {
     /// The features in this collection.
     pub features: Vec<Feature>,
+    /// An optional bounding box `[west, south, east, north]` (plus optional altitude pairs).
+    pub bbox: Option<Vec<f64>>,
+    /// Non-standard members present on the collection, preserved across a serialize/parse round-trip.
+    pub foreign_members: HashMap<String, Value>,
+}
+
+impl Serialize for FeatureCollection {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut state = serializer.serialize_map(None)?;
+        state.serialize_entry("type", "FeatureCollection")?;
+        state.serialize_entry("features", &self.features)?;
+        if let Some(bbox) = &self.bbox {
+            state.serialize_entry("bbox", bbox)?;
+        }
+        for (k, v) in &self.foreign_members {
+            state.serialize_entry(k, v)?;
+        }
+        state.end()
+    }
 }
 
 /// The top-level GeoJSON object.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum GeoJson {
     /// A single Feature.
     Feature(Feature),
@@ -171,6 +212,16 @@ pub enum GeoJson {
     FeatureCollection(FeatureCollection),
     /// A bare Geometry.
     Geometry(Geometry),
+}
+
+impl Serialize for GeoJson {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Feature(f) => f.serialize(serializer),
+            Self::FeatureCollection(fc) => fc.serialize(serializer),
+            Self::Geometry(g) => g.serialize(serializer),
+        }
+    }
 }
 
 // ---- Public API ----
@@ -206,7 +257,48 @@ pub fn parse_reader<R: Read>(mut reader: R) -> Result<GeoJson, GeoError> {
     parse_value(&raw, "")
 }
 
+/// Serialize this GeoJSON value back to a compact JSON string.
+///
+/// The output is valid GeoJSON: [`Feature`] and [`FeatureCollection`] include
+/// their `"type"` member, and any captured `bbox`/foreign members are preserved.
+///
+/// # Example
+///
+/// ```
+/// use tpt_geo_geojson::parse;
+///
+/// let geo = parse(r#"{"type":"Point","coordinates":[1.0,2.0]}"#).unwrap();
+/// let json = tpt_geo_geojson::to_json(&geo).unwrap();
+/// assert!(json.contains("\"type\":\"Point\""));
+/// ```
+pub fn to_json(value: &GeoJson) -> Result<String, GeoError> {
+    serde_json::to_string(value).map_err(|e| GeoError {
+        kind: GeoErrorKind::Json(e),
+        path: String::new(),
+    })
+}
+
 // ---- Internal parsing ----
+
+/// Extract the optional `bbox` array and any non-standard members from `v`,
+/// excluding the `known` field names. Used to preserve `bbox` and foreign
+/// members across a parse/serialize round-trip.
+fn collect_extra(v: &Value, known: &[&str]) -> (Option<Vec<f64>>, HashMap<String, Value>) {
+    let bbox = v
+        .get("bbox")
+        .and_then(Value::as_array)
+        .map(|arr| arr.iter().filter_map(Value::as_f64).collect::<Vec<f64>>());
+    let foreign = v
+        .as_object()
+        .map(|obj| {
+            obj.iter()
+                .filter(|(k, _)| !known.contains(&k.as_str()))
+                .map(|(k, val)| (k.clone(), val.clone()))
+                .collect::<HashMap<String, Value>>()
+        })
+        .unwrap_or_default();
+    (bbox, foreign)
+}
 
 fn parse_value(v: &Value, path: &str) -> Result<GeoJson, GeoError> {
     let type_str = v
@@ -238,7 +330,12 @@ fn parse_value(v: &Value, path: &str) -> Result<GeoJson, GeoError> {
                 let fp = format!("{}features[{}]", prefix, i);
                 features.push(parse_feature(fv, &fp)?);
             }
-            Ok(GeoJson::FeatureCollection(FeatureCollection { features }))
+            let (bbox, foreign_members) = collect_extra(v, &["type", "features", "bbox"]);
+            Ok(GeoJson::FeatureCollection(FeatureCollection {
+                features,
+                bbox,
+                foreign_members,
+            }))
         }
         "Feature" => {
             let fp = if path.is_empty() {
@@ -273,11 +370,15 @@ fn parse_feature(v: &Value, path: &str) -> Result<Feature, GeoError> {
 
     let properties = v.get("properties").cloned();
     let id = v.get("id").cloned();
+    let (bbox, foreign_members) =
+        collect_extra(v, &["type", "geometry", "properties", "id", "bbox"]);
 
     Ok(Feature {
         geometry,
         properties,
         id,
+        bbox,
+        foreign_members,
     })
 }
 
@@ -606,5 +707,60 @@ mod tests {
         assert_eq!(p.longitude(), 1.0);
         assert_eq!(p.latitude(), 2.0);
         assert_eq!(p.altitude(), None);
+    }
+
+    #[test]
+    fn feature_serializes_type_member() {
+        let s = r#"{"type":"Feature","geometry":{"type":"Point","coordinates":[0,0]},"properties":null}"#;
+        let geo = parse(s).unwrap();
+        let json = to_json(&geo).unwrap();
+        assert!(json.contains(r#""type":"Feature""#));
+    }
+
+    #[test]
+    fn feature_collection_round_trips() {
+        let s = r#"{
+            "type":"FeatureCollection",
+            "features":[
+                {"type":"Feature","geometry":{"type":"Point","coordinates":[1,2]},"properties":{"n":1}},
+                {"type":"Feature","geometry":null,"properties":null}
+            ]
+        }"#;
+        let geo = parse(s).unwrap();
+        let json = to_json(&geo).unwrap();
+        let again = parse(&json).unwrap();
+        assert_eq!(geo, again);
+    }
+
+    #[test]
+    fn bbox_is_preserved() {
+        let s = r#"{"type":"FeatureCollection","bbox":[0,0,10,10],"features":[]}"#;
+        let geo = parse(s).unwrap();
+        if let GeoJson::FeatureCollection(fc) = &geo {
+            assert_eq!(fc.bbox, Some(vec![0.0, 0.0, 10.0, 10.0]));
+        } else {
+            panic!("expected FeatureCollection");
+        }
+        let json = to_json(&geo).unwrap();
+        assert!(json.contains(r#""bbox":[0.0,0.0,10.0,10.0]"#));
+        assert_eq!(parse(&json).unwrap(), geo);
+    }
+
+    #[test]
+    fn foreign_members_are_preserved() {
+        let s = r#"{"type":"Feature","properties":null,"title":"hello","extra":42}"#;
+        let geo = parse(s).unwrap();
+        if let GeoJson::Feature(f) = &geo {
+            assert_eq!(
+                f.foreign_members.get("title"),
+                Some(&serde_json::json!("hello"))
+            );
+            assert_eq!(f.foreign_members.get("extra"), Some(&serde_json::json!(42)));
+        } else {
+            panic!("expected Feature");
+        }
+        let json = to_json(&geo).unwrap();
+        assert!(json.contains(r#""title":"hello""#));
+        assert!(json.contains(r#""extra":42"#));
     }
 }

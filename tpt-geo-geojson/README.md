@@ -43,6 +43,28 @@ println!("path: {}", err.path);   // ".coordinates"
 println!("error: {}", err.kind);  // "malformed coordinates: ..."
 ```
 
+## Serialization & round-trip
+
+Parsed values implement `Serialize`, so you can write valid GeoJSON back out with
+[`to_json`](https://docs.rs/tpt-geo-geojson/latest/tpt_geo_geojson/fn.to_json.html).
+`Feature` and `FeatureCollection` correctly emit their `"type"` member, and any
+captured `bbox` or non-standard (foreign) members are preserved across a
+parse → serialize → parse round-trip.
+
+```rust
+use tpt_geo_geojson::parse;
+
+let geo = parse(r#"{"type":"FeatureCollection","bbox":[0,0,10,10],"features":[]}"#).unwrap();
+let json = tpt_geo_geojson::to_json(&geo).unwrap();
+assert!(json.contains(r#""type":"FeatureCollection""#));
+assert!(json.contains("bbox"));
+
+// Non-standard members survive the round-trip too:
+let f = parse(r#"{"type":"Feature","properties":null,"title":"hi"}"#).unwrap();
+let out = tpt_geo_geojson::to_json(&f).unwrap();
+assert!(out.contains(r#""title":"hi""#));
+```
+
 ## License
 
 Licensed under either of [Apache License 2.0](../LICENSE-APACHE) or [MIT](../LICENSE-MIT) at your option.

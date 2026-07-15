@@ -2,7 +2,7 @@
 #![warn(missing_docs)]
 
 use std::fmt;
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, Write};
 
 /// The kind of error that occurred while reading a JSON Lines stream.
 #[derive(Debug)]
@@ -166,6 +166,94 @@ pub fn parse_jsonl<R: BufRead>(reader: R) -> JsonlReader<R> {
     JsonlReader::new(reader)
 }
 
+/// A streaming JSON Lines writer.
+///
+/// Wraps any [`Write`] and emits one JSON value per line. Each call to
+/// [`JsonlWriter::write`] serializes the value with `serde_json` and appends a
+/// trailing newline. Parse errors carry the 1-based line number of the write
+/// that failed.
+///
+/// # Example
+///
+/// ```
+/// use tpt_jsonl_stream::JsonlWriter;
+/// use std::io::Cursor;
+///
+/// let mut buf = Cursor::new(Vec::new());
+/// {
+///     let mut writer = JsonlWriter::new(&mut buf);
+///     writer.write(&serde_json::json!({"a": 1})).unwrap();
+///     writer.write(&serde_json::json!({"b": 2})).unwrap();
+/// }
+/// let out = String::from_utf8(buf.into_inner()).unwrap();
+/// assert_eq!(out, "{\"a\":1}\n{\"b\":2}\n");
+/// ```
+pub struct JsonlWriter<W: Write> {
+    writer: W,
+    line: u64,
+}
+
+impl<W: Write> JsonlWriter<W> {
+    /// Create a new `JsonlWriter` wrapping the given writer.
+    pub fn new(writer: W) -> Self {
+        Self { writer, line: 0 }
+    }
+
+    /// The number of lines (values) written so far.
+    pub fn line_number(&self) -> u64 {
+        self.line
+    }
+
+    /// Serialize `value` as a single JSON Lines record (one line, newline-terminated).
+    pub fn write<T: serde::Serialize>(&mut self, value: &T) -> Result<(), JsonlError> {
+        serde_json::to_writer(&mut self.writer, value).map_err(|e| JsonlError {
+            line: self.line + 1,
+            kind: JsonlErrorKind::Json(e),
+        })?;
+        self.writer.write_all(b"\n").map_err(|e| JsonlError {
+            line: self.line + 1,
+            kind: JsonlErrorKind::Io(e),
+        })?;
+        self.line += 1;
+        Ok(())
+    }
+
+    /// Flush the underlying writer.
+    pub fn flush(&mut self) -> io::Result<()> {
+        self.writer.flush()
+    }
+}
+
+/// Write a sequence of values as JSON Lines to the given [`Write`] sink.
+///
+/// # Example
+///
+/// ```
+/// use tpt_jsonl_stream::write_jsonl;
+/// use std::io::Cursor;
+///
+/// let mut buf = Cursor::new(Vec::new());
+/// let values = vec![serde_json::json!(1), serde_json::json!(2)];
+/// write_jsonl(&mut buf, values.iter()).unwrap();
+/// let out = String::from_utf8(buf.into_inner()).unwrap();
+/// assert_eq!(out, "1\n2\n");
+/// ```
+pub fn write_jsonl<W: Write, I, T>(writer: W, values: I) -> Result<(), JsonlError>
+where
+    I: IntoIterator<Item = T>,
+    T: serde::Serialize,
+{
+    let mut w = JsonlWriter::new(writer);
+    for v in values {
+        w.write(&v)?;
+    }
+    w.flush().map_err(|e| JsonlError {
+        line: w.line_number() + 1,
+        kind: JsonlErrorKind::Io(e),
+    })?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,5 +312,44 @@ mod tests {
         let vals = read_all(b"{\"x\":42}");
         assert_eq!(vals.len(), 1);
         assert_eq!(vals[0]["x"], 42);
+    }
+
+    #[test]
+    fn writer_round_trips_with_reader() {
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut writer = JsonlWriter::new(&mut buf);
+            writer.write(&serde_json::json!({"a": 1})).unwrap();
+            writer.write(&serde_json::json!({"b": "two"})).unwrap();
+            writer.write(&serde_json::json!([1, 2, 3])).unwrap();
+            writer.flush().unwrap();
+        }
+        let written = String::from_utf8(buf.clone()).unwrap();
+        assert_eq!(written, "{\"a\":1}\n{\"b\":\"two\"}\n[1,2,3]\n");
+
+        // The reader should recover the exact same values.
+        let back: Vec<serde_json::Value> = parse_jsonl(BufReader::new(buf.as_slice()))
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(back.len(), 3);
+        assert_eq!(back[0]["a"], 1);
+        assert_eq!(back[1]["b"], "two");
+        assert_eq!(back[2], serde_json::json!([1, 2, 3]));
+    }
+
+    #[test]
+    fn write_jsonl_helper() {
+        let mut buf: Vec<u8> = Vec::new();
+        let values = [serde_json::json!(1), serde_json::json!(2)];
+        write_jsonl(&mut buf, values.iter()).unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap(), "1\n2\n");
+    }
+
+    #[test]
+    fn writer_tracks_line_numbers() {
+        let mut buf: Vec<u8> = Vec::new();
+        let mut writer = JsonlWriter::new(&mut buf);
+        writer.write(&serde_json::json!({"ok": true})).unwrap();
+        assert_eq!(writer.line_number(), 1);
     }
 }

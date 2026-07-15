@@ -10,3 +10,13 @@ description = "Cron expression parser with precise error reporting and human-rea
 keywords = ["cron", "parser", "scheduler", "human-readable"]
 categories = ["parsing", "date-and-time"]
 readme = "README.md"
+
+[dependencies]
+chrono = { version = "0.4", optional = true }
+
+[features]
+chrono = ["dep:chrono"]
+
+[[example]]
+name = "next_run"
+required-features = ["chrono"]

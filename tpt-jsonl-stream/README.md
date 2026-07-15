@@ -52,6 +52,25 @@ for result in parse_jsonl(BufReader::new(data.as_slice())) {
 }
 ```
 
+## Writing
+
+The crate is also a JSON Lines *writer*. [`JsonlWriter`] emits one
+newline-terminated JSON value per call; [`write_jsonl`] writes a whole
+sequence in one go.
+
+```rust
+use tpt_jsonl_stream::JsonlWriter;
+use std::io::Cursor;
+
+let mut buf = Cursor::new(Vec::new());
+{
+    let mut writer = JsonlWriter::new(&mut buf);
+    writer.write(&serde_json::json!({"a": 1})).unwrap();
+    writer.write(&serde_json::json!({"b": 2})).unwrap();
+}
+assert_eq!(String::from_utf8(buf.into_inner()).unwrap(), "{\"a\":1}\n{\"b\":2}\n");
+```
+
 ## License
 
 Licensed under either of [Apache License 2.0](../LICENSE-APACHE) or [MIT](../LICENSE-MIT) at your option.

@@ -143,6 +143,127 @@ impl CronExpr {
     pub fn to_human_readable(&self) -> String {
         human_readable(self)
     }
+
+    /// Return the first time strictly after `after` that this schedule fires.
+    ///
+    /// Only available with the `chrono` feature (the crate stays dependency-free
+    /// by default). The search is bounded to roughly four years ahead, the
+    /// maximum period of a cron schedule (due to February 29th).
+    ///
+    /// ```rust,ignore
+    /// use tpt_cron_parse::CronExpr;
+    /// use chrono::{TimeZone, Utc};
+    /// let expr = CronExpr::parse("0 9 * * 1-5").unwrap();
+    /// let after = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    /// let next = expr.next_after(after).unwrap(); // next weekday at 09:00
+    /// ```
+    #[cfg(feature = "chrono")]
+    pub fn next_after(
+        &self,
+        after: chrono::DateTime<chrono::Utc>,
+    ) -> Option<chrono::DateTime<chrono::Utc>> {
+        use chrono::{Datelike, Timelike};
+        let seconds_set = self.seconds.as_ref().map(|s| expand_field(s, 0, 59));
+        let minutes = expand_field(&self.minutes, 0, 59);
+        let hours = expand_field(&self.hours, 0, 23);
+        let doms = expand_field(&self.dom, 1, 31);
+        let months = expand_field(&self.month, 1, 12);
+        let dows = expand_field(&self.dow, 0, 7)
+            .into_iter()
+            .map(|d| d % 7)
+            .collect::<Vec<_>>();
+        let dom_restricted = !is_any(&self.dom);
+        let dow_restricted = !is_any(&self.dow);
+        let after_minute = after.with_second(0).unwrap().with_nanosecond(0).unwrap();
+        let mut min_start = after_minute + chrono::Duration::minutes(1);
+        let limit = after + chrono::Duration::days(4 * 366 + 1);
+
+        while min_start <= limit {
+            let m = min_start.minute() as u8;
+            let h = min_start.hour() as u8;
+            let dom = min_start.day() as u8;
+            let mon = min_start.month() as u8;
+            let dow = match min_start.weekday() {
+                chrono::Weekday::Sun => 0,
+                chrono::Weekday::Mon => 1,
+                chrono::Weekday::Tue => 2,
+                chrono::Weekday::Wed => 3,
+                chrono::Weekday::Thu => 4,
+                chrono::Weekday::Fri => 5,
+                chrono::Weekday::Sat => 6,
+            };
+            let day_ok = match (dom_restricted, dow_restricted) {
+                (false, false) => true,
+                (true, false) => doms.contains(&dom),
+                (false, true) => dows.contains(&dow),
+                (true, true) => doms.contains(&dom) || dows.contains(&dow),
+            };
+
+            if minutes.contains(&m) && hours.contains(&h) && months.contains(&mon) && day_ok {
+                if let Some(secs) = &seconds_set {
+                    let same_minute = min_start == after_minute;
+                    let s0 = if same_minute {
+                        after.second() as u8 + 1
+                    } else {
+                        0
+                    };
+                    if let Some(&s) = secs.iter().find(|&&s| s >= s0) {
+                        let t = min_start.with_second(s as u32).unwrap();
+                        if t > after {
+                            return Some(t);
+                        }
+                    }
+                } else if min_start > after {
+                    return Some(min_start);
+                }
+            }
+
+            min_start += chrono::Duration::minutes(1);
+        }
+        None
+    }
+}
+
+/// Expand a [`CronField`] into the sorted, de-duplicated set of values it
+/// permits within the inclusive `[min, max]` range.
+#[cfg(feature = "chrono")]
+fn expand_field(field: &CronField, min: u8, max: u8) -> Vec<u8> {
+    let mut out = match field {
+        CronField::Any => (min..=max).collect(),
+        CronField::Value(n) => vec![*n],
+        CronField::Range(a, b) => (*a..=*b).collect(),
+        CronField::Step(base, step) => {
+            let start = match base.as_ref() {
+                CronField::Any => min,
+                CronField::Value(n) => *n,
+                CronField::Range(a, _) => *a,
+                _ => min,
+            };
+            let mut vals = Vec::new();
+            let mut v = start;
+            while v <= max {
+                vals.push(v);
+                if *step == 0 {
+                    break;
+                }
+                match v.checked_add(*step) {
+                    Some(n) => v = n,
+                    None => break,
+                }
+            }
+            vals
+        }
+        CronField::List(items) => {
+            let mut vals = Vec::new();
+            for it in items {
+                vals.extend(expand_field(it, min, max));
+            }
+            vals
+        }
+    };
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 // ---- Parser internals ----
@@ -540,6 +661,52 @@ mod tests {
     fn noon() {
         let e = CronExpr::parse("0 12 * * *").unwrap();
         assert_eq!(e.to_human_readable(), "Every day at 12:00 PM");
+    }
+
+    #[cfg(feature = "chrono")]
+    #[test]
+    fn next_after_weekday_morning() {
+        use chrono::{Datelike, TimeZone, Timelike, Utc, Weekday};
+        let expr = CronExpr::parse("0 9 * * 1-5").unwrap();
+        let after = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(); // Monday
+        let next = expr.next_after(after).unwrap();
+        assert!(next > after);
+        assert_eq!(next.hour(), 9);
+        assert_eq!(next.minute(), 0);
+        assert_eq!(next.weekday(), Weekday::Mon);
+    }
+
+    #[cfg(feature = "chrono")]
+    #[test]
+    fn next_after_steps_and_ranges() {
+        use chrono::{TimeZone, Timelike, Utc};
+        let expr = CronExpr::parse("*/15 * * * *").unwrap();
+        let after = Utc.with_ymd_and_hms(2024, 6, 1, 10, 0, 0).unwrap();
+        let next = expr.next_after(after).unwrap();
+        assert_eq!(next.minute() % 15, 0);
+        assert!(next > after);
+    }
+
+    #[cfg(feature = "chrono")]
+    #[test]
+    fn next_after_6field_seconds() {
+        use chrono::{TimeZone, Timelike, Utc};
+        let expr = CronExpr::parse("30 0 9 * * *").unwrap();
+        let after = Utc.with_ymd_and_hms(2024, 6, 1, 9, 0, 0).unwrap();
+        let next = expr.next_after(after).unwrap();
+        assert_eq!(next.hour(), 9);
+        assert_eq!(next.minute(), 0);
+        assert_eq!(next.second(), 30);
+    }
+
+    #[cfg(feature = "chrono")]
+    #[test]
+    fn next_after_none_within_bound() {
+        use chrono::{TimeZone, Utc};
+        // February 30th can never occur, so a schedule pinned to it never fires.
+        let expr = CronExpr::parse("0 0 30 2 *").unwrap();
+        let after = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        assert!(expr.next_after(after).is_none());
     }
 
     #[test]

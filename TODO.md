@@ -118,9 +118,9 @@
 - [x] Add Dependabot/Renovate config for `serde`/`serde_json`/`simd-json`
 
 ## Phase 10: v0.2.0 feature candidates (post-publish, non-blocking)
-- [ ] `tpt-cron-parse`: "next run time" computation (design decision needed re: time dependency)
-- [ ] `tpt-geo-geojson`: serialization back to valid GeoJSON text (fix `#[serde(tag = "type")]` round-trip gaps)
-- [ ] `tpt-geo-geojson`: `bbox` field support, foreign-member passthrough
-- [ ] `tpt-geo-geojson`: implement or remove unused `GeoErrorKind::InvalidCrs` variant
-- [ ] `tpt-jsonl-stream`: streaming writer (currently reader-only)
-- [ ] Evaluate optional serde support across crates whose output types lack it
+- [x] `tpt-cron-parse`: "next run time" computation (added behind optional `chrono` feature; `next_after` with cron day-of-month/day-of-week OR rule)
+- [x] `tpt-geo-geojson`: serialization back to valid GeoJSON text (Feature/FeatureCollection now emit `type`; `to_json` helper added)
+- [x] `tpt-geo-geojson`: `bbox` field support + foreign-member passthrough on Feature/FeatureCollection
+- [x] `tpt-geo-geojson`: removed unused `GeoErrorKind::InvalidCrs` variant
+- [x] `tpt-jsonl-stream`: streaming writer (`JsonlWriter` + `write_jsonl` helper)
+- [x] Evaluate optional serde support: kept `MimeType`/`CronExpr`/`CronField` dep-free (zero-dependency is a hard crate convention); `tpt-geo-geojson` already derives `Serialize`

@@ -47,6 +47,28 @@ println!("{}", err); // cron parse error in minutes field at position 0: expecte
 | `*/5 * * * *` | Every 5 minutes                 |
 | `0 0 1 1 *`   | At 12:00 AM on January 1st      |
 
+## Computing the next run time
+
+The crate stays dependency-free by default. Enable the optional `chrono` feature
+to compute the next firing time of a schedule:
+
+```toml
+[dependencies]
+tpt-cron-parse = { version = "0.1", features = ["chrono"] }
+```
+
+```rust,ignore
+use tpt_cron_parse::CronExpr;
+use chrono::{TimeZone, Utc};
+
+let expr = CronExpr::parse("0 9 * * 1-5").unwrap();
+let after = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(); // Monday
+let next = expr.next_after(after).unwrap(); // next weekday at 09:00
+```
+
+`next_after` respects the standard cron day-of-month / day-of-week OR rule and
+searches at most ~4 years ahead (the maximum period of a cron schedule).
+
 ## License
 
 Licensed under either of [Apache License 2.0](../LICENSE-APACHE) or [MIT](../LICENSE-MIT) at your option.
