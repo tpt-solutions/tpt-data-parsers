@@ -14,7 +14,7 @@ edition = "2021"
 rust-version = "1.70"
 license = "MIT OR Apache-2.0"
 authors = ["TPT Solutions"]
-repository = "https://github.com/phillipicb/tpt-data-parsers"
+repository = "https://github.com/tpt-solutions/tpt-data-parsers"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
