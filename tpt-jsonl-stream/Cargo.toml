@@ -19,5 +19,5 @@ serde_json = { workspace = true }
 simd = ["dep:simd-json"]
 
 [dependencies.simd-json]
-version = "0.13"
+version = "0.17"
 optional = true
