@@ -1,0 +1,16 @@
+[package]
+name = "tpt-mime-pure"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Pure Rust MIME type detection via magic bytes. 100% no_std compatible"
+keywords = ["mime", "magic-bytes", "file-detection", "no-std", "file-type"]
+categories = ["encoding", "filesystem", "no-std"]
+readme = "README.md"
+
+[features]
+default = ["std"]
+std = []
