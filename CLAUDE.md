@@ -39,7 +39,7 @@ cargo test --no-default-features -p tpt-mime-pure
   `[workspace.package]` / `[workspace.dependencies]`. Member crates reference
   them with `workspace = true` — never hardcode these values in a crate's own
   `Cargo.toml`.
-- MSRV is **1.70**; avoid syntax/stdlib features newer than that.
+- MSRV is **1.71**; avoid syntax/stdlib features newer than that.
 - `tpt-cron-parse`, `tpt-mime-pure`, and `tpt-logfmt-parse` have **zero
   runtime dependencies** by design — don't add one without discussing it.
 - Each crate targets zero/low-allocation parsing in the hot path, especially

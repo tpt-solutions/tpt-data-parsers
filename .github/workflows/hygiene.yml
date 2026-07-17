@@ -20,7 +20,7 @@ jobs:
       - name: Cargo.toml authors must resolve to TPT Solutions
         run: |
           bad=$(grep -rEn '^authors' --include='*.toml' . \
-            | grep -vE 'authors\s*=\s*\{?\s*workspace' \
+            | grep -vE 'authors(\.workspace\s*=|\s*=\s*\{?\s*workspace)' \
             | grep -v 'TPT Solutions' || true)
           if [ -n "$bad" ]; then
             echo "ERROR: authors field must be 'TPT Solutions' or use workspace inheritance:"

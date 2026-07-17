@@ -38,11 +38,11 @@ jobs:
         run: cargo test --no-default-features -p tpt-mime-pure
 
   msrv:
-    name: MSRV (1.70)
+    name: MSRV (1.71)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.70.0
+      - uses: dtolnay/rust-toolchain@1.71.0
       - uses: Swatinem/rust-cache@v2
 
       - name: test (all features)
