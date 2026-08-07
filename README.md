@@ -32,6 +32,8 @@ designed to be dropped into a pipeline, a log shipper, or a constrained
   errors → **`tpt-cron-parse`**.
 - **I need to identify a file's type** from its bytes or extension (no `file` binary) →
   **`tpt-mime-pure`**.
+- **I want a ready-made command-line tool** to detect, validate, or parse files without
+  writing code → **`tpt-cli`**.
 
 If you only have a filename/path rather than raw bytes, `tpt-mime-pure`'s
 `detect_by_extension` is the right tool. If you have raw bytes, use `detect`.
@@ -47,6 +49,24 @@ If you only have a filename/path rather than raw bytes, `tpt-mime-pure`'s
   structure paths instead of opaque failures.
 - **`no_std` capable** — `tpt-mime-pure` works without the standard library
   (its `std` feature is default; disable it via `default-features = false`).
+
+## Command-line tool
+
+Prefer a binary over a library? [`tpt-cli`](./tpt-cli) wraps all five parsers behind a
+single `tpt` executable:
+
+```bash
+cargo install --path tpt-cli
+
+tpt cron "0 9 * * 1-5" --next   # describe a schedule (and show the next run)
+tpt mime file.bin                # detect type from magic bytes (falls back to extension)
+tpt geojson map.geojson          # validate a GeoJSON file
+tpt logfmt 'level=info msg="hi"' # parse a logfmt line
+tpt jsonl data.jsonl             # count records in a JSON Lines file
+```
+
+`tpt-cli` is **not** published to crates.io — it is a convenience front-end for the
+workspace.
 
 ## Workspace & contributing
 

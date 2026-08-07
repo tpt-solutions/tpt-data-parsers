@@ -23,3 +23,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Kilo planning artifacts (local, not project code)
+.kilo/
