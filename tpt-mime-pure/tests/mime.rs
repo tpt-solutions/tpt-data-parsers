@@ -1,4 +1,4 @@
-use tpt_mime_pure::{detect, detect_by_extension, MimeType};
+use tpt_mime_pure::{detect, detect_all, detect_by_extension, MimeType};
 
 #[test]
 fn integration_sqlite_magic() {
@@ -11,7 +11,25 @@ fn integration_sqlite_magic() {
 
 #[test]
 fn integration_mkv_magic() {
-    assert_eq!(detect(&[0x1A, 0x45, 0xDF, 0xA3, 0x01]), Some(MimeType::Mkv));
+    let sig: &[u8] = &[
+        0x1A, 0x45, 0xDF, 0xA3, 0x8B, 0x42, 0x82, 0x88, b'm', b'a', b't', b'r', b'o', b's', b'k',
+        b'a',
+    ];
+    assert_eq!(detect(sig), Some(MimeType::Mkv));
+}
+
+#[test]
+fn integration_ebml_without_doctype_is_none() {
+    assert_eq!(detect(&[0x1A, 0x45, 0xDF, 0xA3, 0x01]), None);
+}
+
+#[test]
+fn integration_detect_all_matches_detect_first() {
+    let inputs: [&[u8]; 3] = [&[0xFF, 0xD8, 0xFF, 0xE0], b"%PDF-1.7", b"not a real file"];
+    for input in inputs {
+        let all: Vec<MimeType> = detect_all(input).collect();
+        assert_eq!(all.first().copied(), detect(input));
+    }
 }
 
 #[test]

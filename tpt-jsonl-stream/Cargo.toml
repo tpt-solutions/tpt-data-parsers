@@ -17,10 +17,17 @@ serde_json = { workspace = true }
 
 [features]
 simd = ["dep:simd-json"]
+tokio = ["dep:tokio"]
 
 [dependencies.simd-json]
 version = "0.13"
 optional = true
+
+[dependencies.tokio]
+version = "1"
+optional = true
+default-features = false
+features = ["io-util", "rt", "macros"]
 
 [package.metadata.docs.rs]
 all-features = true

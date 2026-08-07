@@ -10,10 +10,11 @@ No OS calls, no shelling out to `file`. Works in minimal Docker containers, WASM
 ## Features
 
 - **Magic byte detection** — checks the file's leading bytes against known signatures
+- **All matches** — `detect_all` reports every signature that matched, not just the first
 - **Extension fallback** — `detect_by_extension("pdf")` for when you only have a filename
 - **`no_std` compatible** — works without the standard library (with `alloc`); disable the default `std` feature
 - **No dependencies** — zero external crates
-- **~28 common formats** — images, video, audio, archives, documents, binaries
+- **~37 common formats** — images, video, audio, archives, documents, binaries
 
 ## Usage
 
@@ -23,6 +24,21 @@ use tpt_mime_pure::{detect, MimeType};
 let jpeg_header = &[0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
 assert_eq!(detect(jpeg_header), Some(MimeType::Jpeg));
 println!("{}", MimeType::Jpeg.as_str()); // image/jpeg
+```
+
+### All matching types
+
+Some input matches more than one signature — a `.docx` is also a valid ZIP archive.
+`detect_all` returns an allocation-free iterator over every match, most specific
+first, so its first item is always what `detect` would return.
+
+```rust
+use tpt_mime_pure::{detect_all, MimeType};
+
+let all: Vec<MimeType> = detect_all(&[0xFF, 0xD8, 0xFF, 0xE0]).collect();
+assert_eq!(all, vec![MimeType::Jpeg]);
+
+assert_eq!(detect_all(b"hello world").next(), None);
 ```
 
 ### Extension fallback
@@ -35,6 +51,9 @@ assert_eq!(detect_by_extension("PDF"), Some(MimeType::Pdf)); // case-insensitive
 ```
 
 ### File detection (requires `std` feature, enabled by default)
+
+`detect_file` buffers up to 8 KB from disk, looping until the buffer is full or
+the file ends, so signatures stored at an offset survive short reads.
 
 ```rust,ignore
 use tpt_mime_pure::detect_file;
@@ -75,17 +94,38 @@ tpt-mime-pure = { version = "0.2", default-features = false }
 | `Ogg` | `audio/ogg` | `OggS` |
 | `Pdf` | `application/pdf` | `%PDF` |
 | `Zip` | `application/zip` | `PK\x03\x04` |
+| `Docx` | `application/vnd.openxmlformats-officedocument.wordprocessingml.document` | ZIP entry `word/…` |
+| `Xlsx` | `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` | ZIP entry `xl/…` |
+| `Pptx` | `application/vnd.openxmlformats-officedocument.presentationml.presentation` | ZIP entry `ppt/…` |
+| `Jar` | `application/java-archive` | ZIP entry `META-INF/MANIFEST.MF` |
 | `Gzip` | `application/gzip` | `1F 8B` |
 | `Tar` | `application/x-tar` | `ustar` at offset 257 |
 | `Sqlite` | `application/x-sqlite3` | `SQLite format 3\0` |
 | `Wasm` | `application/wasm` | `\0asm` |
 | `Elf` | `application/x-elf` | `\x7FELF` |
 | `PeExe` | `application/x-msdownload` | `MZ` |
-| `Zstd` | `application/zstd` | `28 4D 18 09` |
+| `Zstd` | `application/zstd` | `28 B5 2F FD` |
 | `Xz` | `application/x-xz` | `FD 37 7A 58 5A 00` |
 | `Woff` | `font/woff` | `wOFF` |
 | `Woff2` | `font/woff2` | `wOF2` |
 | `JavaClass` | `application/x-java-class` | `CA FE BA BE` |
+
+The OOXML and JAR subtypes are recognised by scanning the ZIP local file header
+entry names within the first 8 KB; anything else beginning with `PK\x03\x04`
+stays `Zip`.
+
+## False positives
+
+Detection is signature based, and several formats are identified by very short
+signatures — `BM` (BMP), `MZ` (PE/EXE), `1F 8B` (gzip), `00 00 01 00` (ICO) and
+`CA FE BA BE` (Java class). Byte sequences that short occur naturally in
+ordinary text and in arbitrary binary data, so a match is a hint rather than
+proof: a plain text file beginning with `BM` is reported as `MimeType::Bmp`, and
+one beginning with `MZ` as `MimeType::PeExe`.
+
+For untrusted input, treat the result as advisory: cross-check it against the
+file extension or a real parse of the format before acting on it, and use
+`detect_all` to see whether the input matched more than one signature.
 
 ## Why another MIME detector?
 

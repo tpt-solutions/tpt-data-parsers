@@ -3,7 +3,7 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
 //! Pure Rust MIME type detection via magic bytes and file extension fallback.
-//! See [`detect`], [`detect_by_extension`], and [`MimeType`].
+//! See [`detect`], [`detect_all`], [`detect_by_extension`], and [`MimeType`].
 
 /// A detected MIME type.
 ///
@@ -61,6 +61,14 @@ pub enum MimeType {
     Pdf,
     /// `application/zip`
     Zip,
+    /// `application/vnd.openxmlformats-officedocument.wordprocessingml.document`
+    Docx,
+    /// `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`
+    Xlsx,
+    /// `application/vnd.openxmlformats-officedocument.presentationml.presentation`
+    Pptx,
+    /// `application/java-archive`
+    Jar,
     /// `application/gzip`
     Gzip,
     /// `application/x-tar`
@@ -113,6 +121,12 @@ impl MimeType {
             Self::Ogg => "audio/ogg",
             Self::Pdf => "application/pdf",
             Self::Zip => "application/zip",
+            Self::Docx => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            Self::Xlsx => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            Self::Pptx => {
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            }
+            Self::Jar => "application/java-archive",
             Self::Gzip => "application/gzip",
             Self::Tar => "application/x-tar",
             Self::Sqlite => "application/x-sqlite3",
@@ -152,6 +166,10 @@ impl MimeType {
             Self::Ogg => "ogg",
             Self::Pdf => "pdf",
             Self::Zip => "zip",
+            Self::Docx => "docx",
+            Self::Xlsx => "xlsx",
+            Self::Pptx => "pptx",
+            Self::Jar => "jar",
             Self::Gzip => "gz",
             Self::Tar => "tar",
             Self::Sqlite => "db",
@@ -170,9 +188,24 @@ impl MimeType {
 /// Detect MIME type from the leading bytes of a file.
 ///
 /// Checks the leading bytes against known magic byte signatures.
-/// [`detect_file`] reads up to 8 KB from disk; all built-in signatures are
-/// found within the first 512 bytes, so shorter slices work equally well.
+/// [`detect_file`] reads up to 8 KB from disk; every signature except the ZIP
+/// entry names that identify the OOXML and JAR subtypes is found within the
+/// first 512 bytes, so shorter slices work almost equally well.
 /// Returns `None` if no signature matches.
+///
+/// When an input matches several signatures the most specific one is returned;
+/// [`detect_all`] reports every match.
+///
+/// # False positives
+///
+/// Several formats are identified by very short signatures — `BM` (BMP), `MZ`
+/// (PE/EXE), `1F 8B` (gzip), `00 00 01 00` (ICO) and `CA FE BA BE` (Java class).
+/// Byte sequences that short occur naturally in ordinary text and in arbitrary
+/// binary data, so a match is a hint rather than proof: a plain text file
+/// beginning with `BM` is reported as [`MimeType::Bmp`], and one beginning with
+/// `MZ` as [`MimeType::PeExe`]. For untrusted input treat the result as
+/// advisory — cross-check it against the file extension or a real parse of the
+/// format, and use [`detect_all`] to see whether the input was ambiguous.
 ///
 /// # Example
 ///
@@ -183,6 +216,103 @@ impl MimeType {
 /// assert_eq!(detect(jpeg_header), Some(MimeType::Jpeg));
 /// ```
 pub fn detect(bytes: &[u8]) -> Option<MimeType> {
+    let mut sink = Sink::new(true);
+    scan(bytes, &mut sink);
+    sink.items[0]
+}
+
+/// Detect every MIME type whose signature matches the leading bytes.
+///
+/// [`detect`] returns only the first match, which hides genuinely ambiguous
+/// input: a `.docx` file is also a valid ZIP archive, and a TAR archive whose
+/// first member name starts with `BM` also matches the BMP signature. Matches
+/// are yielded in the same priority order [`detect`] uses, so the first item is
+/// always what [`detect`] would have returned, and an empty iterator means the
+/// same thing as `None`.
+///
+/// The iterator borrows nothing, allocates nothing, and yields at most
+/// [`MAX_MATCHES`] items.
+///
+/// # Example
+///
+/// ```
+/// use tpt_mime_pure::{detect_all, MimeType};
+///
+/// let all: Vec<MimeType> = detect_all(&[0xFF, 0xD8, 0xFF, 0xE0]).collect();
+/// assert_eq!(all, vec![MimeType::Jpeg]);
+///
+/// assert_eq!(detect_all(b"hello world").next(), None);
+/// ```
+pub fn detect_all(bytes: &[u8]) -> MimeMatches {
+    let mut sink = Sink::new(false);
+    scan(bytes, &mut sink);
+    MimeMatches {
+        items: sink.items,
+        len: sink.len,
+        pos: 0,
+    }
+}
+
+/// The maximum number of matches [`detect_all`] can report for one input.
+pub const MAX_MATCHES: usize = 8;
+
+/// Iterator over the MIME types matched by [`detect_all`].
+///
+/// Yields at most [`MAX_MATCHES`] items, most specific first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MimeMatches {
+    items: [Option<MimeType>; MAX_MATCHES],
+    len: usize,
+    pos: usize,
+}
+
+impl Iterator for MimeMatches {
+    type Item = MimeType;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.pos >= self.len {
+            return None;
+        }
+        let item = self.items[self.pos];
+        self.pos += 1;
+        item
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.len.saturating_sub(self.pos);
+        (remaining, Some(remaining))
+    }
+}
+
+impl ExactSizeIterator for MimeMatches {}
+
+impl core::iter::FusedIterator for MimeMatches {}
+
+struct Sink {
+    items: [Option<MimeType>; MAX_MATCHES],
+    len: usize,
+    first_only: bool,
+}
+
+impl Sink {
+    const fn new(first_only: bool) -> Self {
+        Self {
+            items: [None; MAX_MATCHES],
+            len: 0,
+            first_only,
+        }
+    }
+
+    fn push(&mut self, mime: MimeType) -> bool {
+        if self.len < MAX_MATCHES {
+            self.items[self.len] = Some(mime);
+            self.len += 1;
+        }
+        !self.first_only && self.len < MAX_MATCHES
+    }
+}
+
+fn scan(bytes: &[u8], out: &mut Sink) {
     let b = bytes;
     let len = b.len();
 
@@ -198,156 +328,248 @@ pub fn detect(bytes: &[u8]) -> Option<MimeType> {
         };
     }
 
+    macro_rules! emit {
+        ($mime:expr) => {
+            if !out.push($mime) {
+                return;
+            }
+        };
+    }
+
     // JPEG: FF D8 FF
     if starts_with!([0xFF, 0xD8, 0xFF]) {
-        return Some(MimeType::Jpeg);
+        emit!(MimeType::Jpeg);
     }
     // PNG: 89 50 4E 47 0D 0A 1A 0A
     if starts_with!([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) {
-        return Some(MimeType::Png);
+        emit!(MimeType::Png);
     }
     // GIF: 47 49 46 38
     if starts_with!([0x47, 0x49, 0x46, 0x38]) {
-        return Some(MimeType::Gif);
+        emit!(MimeType::Gif);
     }
     // WebP: "RIFF" at 0, "WEBP" at offset 8
     if starts_with!([0x52, 0x49, 0x46, 0x46]) && at_offset!(8, [0x57, 0x45, 0x42, 0x50]) {
-        return Some(MimeType::WebP);
+        emit!(MimeType::WebP);
     }
     // PDF: %PDF
     if starts_with!([0x25, 0x50, 0x44, 0x46]) {
-        return Some(MimeType::Pdf);
+        emit!(MimeType::Pdf);
     }
     // WASM: \0asm
     if starts_with!([0x00, 0x61, 0x73, 0x6D]) {
-        return Some(MimeType::Wasm);
+        emit!(MimeType::Wasm);
     }
     // ELF: \x7FELF
     if starts_with!([0x7F, 0x45, 0x4C, 0x46]) {
-        return Some(MimeType::Elf);
+        emit!(MimeType::Elf);
     }
     // PE/EXE: MZ
     if starts_with!([0x4D, 0x5A]) {
-        return Some(MimeType::PeExe);
+        emit!(MimeType::PeExe);
     }
     // GZIP: 1F 8B
     if starts_with!([0x1F, 0x8B]) {
-        return Some(MimeType::Gzip);
+        emit!(MimeType::Gzip);
     }
-    // ZIP (also DOCX/XLSX): PK\x03\x04
+    // ZIP (also DOCX/XLSX/PPTX/JAR): PK\x03\x04
     if starts_with!([0x50, 0x4B, 0x03, 0x04]) {
-        return Some(MimeType::Zip);
+        if let Some(sub) = zip_subtype(b) {
+            emit!(sub);
+        }
+        emit!(MimeType::Zip);
     }
     // SQLite: "SQLite format 3\0"
     if starts_with!([
         0x53, 0x51, 0x4C, 0x69, 0x74, 0x65, 0x20, 0x66, 0x6F, 0x72, 0x6D, 0x61, 0x74, 0x20, 0x33,
         0x00
     ]) {
-        return Some(MimeType::Sqlite);
+        emit!(MimeType::Sqlite);
     }
     // FLAC: fLaC
     if starts_with!([0x66, 0x4C, 0x61, 0x43]) {
-        return Some(MimeType::Flac);
+        emit!(MimeType::Flac);
     }
     // OGG: OggS
     if starts_with!([0x4F, 0x67, 0x67, 0x53]) {
-        return Some(MimeType::Ogg);
+        emit!(MimeType::Ogg);
     }
     // MP3: ID3 tag or sync word FF FB/FA/F3/F2
     if starts_with!([0x49, 0x44, 0x33]) {
-        return Some(MimeType::Mp3);
+        emit!(MimeType::Mp3);
     }
     if len >= 2 && b[0] == 0xFF && (b[1] == 0xFB || b[1] == 0xFA || b[1] == 0xF3 || b[1] == 0xF2) {
-        return Some(MimeType::Mp3);
+        emit!(MimeType::Mp3);
     }
     // MKV / WebM: EBML magic 1A 45 DF A3. Both share the same EBML header but
-    // declare a different DocType ("webm" vs "matroska"). Scan the leading bytes
-    // for the DocType element (id 0x42 0x82) and inspect its value.
+    // declare a different DocType ("webm" vs "matroska"). Walk the header's
+    // child elements and inspect the DocType element (id 0x4282).
     if starts_with!([0x1A, 0x45, 0xDF, 0xA3]) {
-        let limit = len.min(512);
-        let mut idx = 0;
-        let mut kind = MimeType::Mkv;
-        while idx + 3 <= limit {
-            if b[idx] == 0x42 && b[idx + 1] == 0x82 {
-                let data_len = (b[idx + 2] & 0x7F) as usize;
-                if idx + 3 + data_len <= limit {
-                    let doc_type = &b[idx + 3..idx + 3 + data_len];
-                    if doc_type == b"webm" {
-                        kind = MimeType::WebM;
-                        break;
-                    } else if doc_type == b"matroska" {
-                        kind = MimeType::Mkv;
-                        break;
-                    }
-                }
-            }
-            idx += 1;
+        if let Some(kind) = ebml_doc_type(b) {
+            emit!(kind);
         }
-        return Some(kind);
+        return;
     }
     // MP4 / MOV / 3GP / HEIC / HEIF / AVIF: ISO-BMFF `ftyp` box at offset 4.
     // The 4-byte major-brand string at offset 8 distinguishes the variants;
     // unknown brands fall back to MP4.
     if at_offset!(4, [0x66, 0x74, 0x79, 0x70]) {
-        if len >= 12 {
-            let brand = &b[8..12];
-            return Some(match brand {
+        let kind = if len >= 12 {
+            match &b[8..12] {
                 b"heic" | b"heix" | b"hevc" | b"hevx" => MimeType::Heic,
                 b"mif1" => MimeType::Heif,
                 b"avif" | b"avis" => MimeType::Avif,
                 b"qt  " => MimeType::QuickTime,
                 b"3gp4" | b"3gp5" | b"3gp6" | b"3gr6" | b"3gs6" | b"3gpp" => MimeType::ThreeGp,
                 _ => MimeType::Mp4,
-            });
-        }
-        return Some(MimeType::Mp4);
+            }
+        } else {
+            MimeType::Mp4
+        };
+        emit!(kind);
+        return;
     }
     // WAV: RIFF at 0, WAVE at offset 8
     if starts_with!([0x52, 0x49, 0x46, 0x46]) && at_offset!(8, [0x57, 0x41, 0x56, 0x45]) {
-        return Some(MimeType::Wav);
+        emit!(MimeType::Wav);
     }
     // AVI: RIFF at 0, AVI  at offset 8
     if starts_with!([0x52, 0x49, 0x46, 0x46]) && at_offset!(8, [0x41, 0x56, 0x49, 0x20]) {
-        return Some(MimeType::Avi);
+        emit!(MimeType::Avi);
     }
     // TAR: "ustar" at offset 257
     if at_offset!(257, [0x75, 0x73, 0x74, 0x61, 0x72]) {
-        return Some(MimeType::Tar);
+        emit!(MimeType::Tar);
     }
     // BMP: BM
     if starts_with!([0x42, 0x4D]) {
-        return Some(MimeType::Bmp);
+        emit!(MimeType::Bmp);
     }
     // ICO: 00 00 01 00
     if starts_with!([0x00, 0x00, 0x01, 0x00]) {
-        return Some(MimeType::Ico);
+        emit!(MimeType::Ico);
     }
     // TIFF: II (little-endian) or MM (big-endian)
     if starts_with!([0x49, 0x49, 0x2A, 0x00]) || starts_with!([0x4D, 0x4D, 0x00, 0x2A]) {
-        return Some(MimeType::Tiff);
+        emit!(MimeType::Tiff);
     }
 
-    // Zstandard: 28 4D 18 09
-    if starts_with!([0x28, 0x4D, 0x18, 0x09]) {
-        return Some(MimeType::Zstd);
+    // Zstandard: frame magic 0xFD2FB528, little-endian on disk
+    if starts_with!([0x28, 0xB5, 0x2F, 0xFD]) {
+        emit!(MimeType::Zstd);
     }
     // XZ: FD 37 7A 58 5A 00
     if starts_with!([0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00]) {
-        return Some(MimeType::Xz);
+        emit!(MimeType::Xz);
     }
     // WOFF: "wOFF"
     if starts_with!([0x77, 0x4F, 0x46, 0x46]) {
-        return Some(MimeType::Woff);
+        emit!(MimeType::Woff);
     }
     // WOFF2: "wOF2"
     if starts_with!([0x77, 0x4F, 0x46, 0x32]) {
-        return Some(MimeType::Woff2);
+        emit!(MimeType::Woff2);
     }
     // Java class file: CA FE BA BE
     if starts_with!([0xCA, 0xFE, 0xBA, 0xBE]) {
-        return Some(MimeType::JavaClass);
+        emit!(MimeType::JavaClass);
     }
+}
 
+const EBML_SCAN_LIMIT: usize = 512;
+const ZIP_SCAN_LIMIT: usize = 8192;
+const EBML_DOC_TYPE_ID: u64 = 0x4282;
+
+fn clamped_end(start: usize, size: u64, limit: usize) -> usize {
+    usize::try_from(size)
+        .ok()
+        .and_then(|size| start.checked_add(size))
+        .unwrap_or(limit)
+        .min(limit)
+}
+
+fn ebml_vint(b: &[u8], pos: usize, mask_marker: bool, max_len: usize) -> Option<(u64, usize)> {
+    let first = *b.get(pos)?;
+    if first == 0 {
+        return None;
+    }
+    let vint_len = first.leading_zeros() as usize + 1;
+    if vint_len > max_len || pos + vint_len > b.len() {
+        return None;
+    }
+    let mut value = if mask_marker {
+        u64::from(first) & (0xFFu64 >> vint_len)
+    } else {
+        u64::from(first)
+    };
+    for &byte in &b[pos + 1..pos + vint_len] {
+        value = (value << 8) | u64::from(byte);
+    }
+    Some((value, vint_len))
+}
+
+fn ebml_id(b: &[u8], pos: usize) -> Option<(u64, usize)> {
+    ebml_vint(b, pos, false, 4)
+}
+
+fn ebml_size(b: &[u8], pos: usize) -> Option<(u64, usize)> {
+    ebml_vint(b, pos, true, 8)
+}
+
+fn trim_trailing_nulls(value: &[u8]) -> &[u8] {
+    let mut end = value.len();
+    while end > 0 && value[end - 1] == 0 {
+        end -= 1;
+    }
+    &value[..end]
+}
+
+fn ebml_doc_type(b: &[u8]) -> Option<MimeType> {
+    let limit = b.len().min(EBML_SCAN_LIMIT);
+    let (header_size, header_size_len) = ebml_size(b, 4)?;
+    let mut pos = 4 + header_size_len;
+    let header_end = clamped_end(pos, header_size, limit);
+    while pos < header_end {
+        let (id, id_len) = ebml_id(b, pos)?;
+        let (data_size, data_size_len) = ebml_size(b, pos + id_len)?;
+        let data_start = pos + id_len + data_size_len;
+        let data_end = clamped_end(data_start, data_size, limit);
+        if id == EBML_DOC_TYPE_ID {
+            let value = trim_trailing_nulls(b.get(data_start..data_end)?);
+            return match value {
+                b"webm" => Some(MimeType::WebM),
+                b"matroska" => Some(MimeType::Mkv),
+                _ => None,
+            };
+        }
+        pos = data_end;
+    }
+    None
+}
+
+fn zip_subtype(b: &[u8]) -> Option<MimeType> {
+    let limit = b.len().min(ZIP_SCAN_LIMIT);
+    let mut pos = 0;
+    while pos + 30 <= limit {
+        if b[pos] == 0x50 && b[pos + 1] == 0x4B && b[pos + 2] == 0x03 && b[pos + 3] == 0x04 {
+            let name_len = u16::from_le_bytes([b[pos + 26], b[pos + 27]]) as usize;
+            let name_start = pos + 30;
+            let name = &b[name_start..name_start.saturating_add(name_len).min(limit)];
+            if name.starts_with(b"word/") {
+                return Some(MimeType::Docx);
+            }
+            if name.starts_with(b"xl/") {
+                return Some(MimeType::Xlsx);
+            }
+            if name.starts_with(b"ppt/") {
+                return Some(MimeType::Pptx);
+            }
+            if name.starts_with(b"META-INF/MANIFEST.MF") {
+                return Some(MimeType::Jar);
+            }
+        }
+        pos += 1;
+    }
     None
 }
 
@@ -436,8 +658,20 @@ pub fn detect_by_extension(ext: &str) -> Option<MimeType> {
     if eq("pdf") {
         return Some(MimeType::Pdf);
     }
-    if eq("zip") || eq("docx") || eq("xlsx") || eq("pptx") || eq("jar") {
+    if eq("zip") {
         return Some(MimeType::Zip);
+    }
+    if eq("docx") {
+        return Some(MimeType::Docx);
+    }
+    if eq("xlsx") {
+        return Some(MimeType::Xlsx);
+    }
+    if eq("pptx") {
+        return Some(MimeType::Pptx);
+    }
+    if eq("jar") {
+        return Some(MimeType::Jar);
     }
     if eq("gz") || eq("gzip") {
         return Some(MimeType::Gzip);
@@ -478,6 +712,10 @@ pub fn detect_by_extension(ext: &str) -> Option<MimeType> {
 
 /// Read up to 8 KB from `path` and detect the MIME type.
 ///
+/// Reads repeatedly until 8 KB have been buffered or the file ends, so
+/// signatures that live at an offset (`ustar` at byte 257, an EBML `DocType`)
+/// are still found on readers that return short reads.
+///
 /// Falls back to `None` if the magic bytes are not recognised.
 /// Requires the `std` feature (enabled by default).
 #[cfg(feature = "std")]
@@ -485,8 +723,16 @@ pub fn detect_file(path: impl AsRef<std::path::Path>) -> std::io::Result<Option<
     use std::io::Read;
     let mut buf = [0u8; 8192];
     let mut f = std::fs::File::open(path)?;
-    let n = f.read(&mut buf)?;
-    Ok(detect(&buf[..n]))
+    let mut filled = 0;
+    while filled < buf.len() {
+        match f.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(detect(&buf[..filled]))
 }
 
 #[cfg(test)]
@@ -540,9 +786,14 @@ mod tests {
     #[test]
     fn zstd() {
         assert_eq!(
-            detect(&[0x28, 0x4D, 0x18, 0x09, 0x00]),
+            detect(&[0x28, 0xB5, 0x2F, 0xFD, 0x00]),
             Some(MimeType::Zstd)
         );
+    }
+
+    #[test]
+    fn zstd_byte_swapped_magic_is_not_zstd() {
+        assert_eq!(detect(&[0x28, 0x4D, 0x18, 0x09, 0x00]), None);
     }
 
     #[test]
@@ -640,8 +891,12 @@ mod tests {
     }
 
     #[test]
-    fn ext_docx_is_zip() {
-        assert_eq!(detect_by_extension("docx"), Some(MimeType::Zip));
+    fn ext_ooxml_and_jar() {
+        assert_eq!(detect_by_extension("docx"), Some(MimeType::Docx));
+        assert_eq!(detect_by_extension("xlsx"), Some(MimeType::Xlsx));
+        assert_eq!(detect_by_extension("pptx"), Some(MimeType::Pptx));
+        assert_eq!(detect_by_extension("jar"), Some(MimeType::Jar));
+        assert_eq!(detect_by_extension("zip"), Some(MimeType::Zip));
     }
 
     #[test]
@@ -769,5 +1024,166 @@ mod tests {
         assert_eq!(detect_by_extension("avif"), Some(MimeType::Avif));
         assert_eq!(detect_by_extension("mov"), Some(MimeType::QuickTime));
         assert_eq!(detect_by_extension("3gp"), Some(MimeType::ThreeGp));
+    }
+
+    #[test]
+    fn ebml_without_doctype_is_none() {
+        assert_eq!(detect(&[0x1A, 0x45, 0xDF, 0xA3, 0x01]), None);
+    }
+
+    #[test]
+    fn ebml_unknown_doctype_is_none() {
+        let bytes = [
+            0x1A, 0x45, 0xDF, 0xA3, 0x8B, 0x42, 0x82, 0x88, b'w', b'e', b'i', b'r', b'd', b'!',
+            b'!', b'!',
+        ];
+        assert_eq!(detect(&bytes), None);
+    }
+
+    #[test]
+    fn ebml_doctype_past_scan_window_is_none() {
+        let mut bytes = [0u8; 1024];
+        bytes[..4].copy_from_slice(&[0x1A, 0x45, 0xDF, 0xA3]);
+        bytes[4..8].copy_from_slice(&[0x10, 0x00, 0x02, 0xBC]);
+        bytes[8] = 0xEC;
+        bytes[9..13].copy_from_slice(&[0x10, 0x00, 0x02, 0x4B]);
+        bytes[600..607].copy_from_slice(&[0x42, 0x82, 0x84, b'w', b'e', b'b', b'm']);
+        assert_eq!(detect(&bytes), None);
+    }
+
+    #[test]
+    fn matroska_via_multibyte_vint_size() {
+        let bytes = [
+            0x1A, 0x45, 0xDF, 0xA3, 0x8C, 0x42, 0x82, 0x40, 0x08, b'm', b'a', b't', b'r', b'o',
+            b's', b'k', b'a',
+        ];
+        assert_eq!(detect(&bytes), Some(MimeType::Mkv));
+    }
+
+    #[test]
+    fn webm_doctype_after_other_elements() {
+        let bytes = [
+            0x1A, 0x45, 0xDF, 0xA3, 0x8B, 0x42, 0x86, 0x81, 0x01, 0x42, 0x82, 0x84, b'w', b'e',
+            b'b', b'm',
+        ];
+        assert_eq!(detect(&bytes), Some(MimeType::WebM));
+    }
+
+    #[test]
+    fn ebml_doctype_id_inside_payload_is_skipped() {
+        let bytes = [
+            0x1A, 0x45, 0xDF, 0xA3, 0x8D, 0xBF, 0x84, 0x42, 0x82, 0x84, 0x77, 0x42, 0x82, 0x84,
+            b'w', b'e', b'b', b'm',
+        ];
+        assert_eq!(detect(&bytes), Some(MimeType::WebM));
+    }
+
+    #[test]
+    fn webm_doctype_with_null_padding() {
+        let bytes = [
+            0x1A, 0x45, 0xDF, 0xA3, 0x8B, 0x42, 0x82, 0x88, b'w', b'e', b'b', b'm', 0, 0, 0, 0,
+        ];
+        assert_eq!(detect(&bytes), Some(MimeType::WebM));
+    }
+
+    fn zip_with_entry(buf: &mut [u8], offset: usize, name: &[u8]) {
+        buf[offset..offset + 4].copy_from_slice(&[0x50, 0x4B, 0x03, 0x04]);
+        let name_len = u16::try_from(name.len()).unwrap().to_le_bytes();
+        buf[offset + 26..offset + 28].copy_from_slice(&name_len);
+        buf[offset + 30..offset + 30 + name.len()].copy_from_slice(name);
+    }
+
+    #[test]
+    fn docx_via_zip_entry_name() {
+        let mut bytes = [0u8; 64];
+        zip_with_entry(&mut bytes, 0, b"word/document.xml");
+        assert_eq!(detect(&bytes), Some(MimeType::Docx));
+    }
+
+    #[test]
+    fn xlsx_via_second_zip_entry_name() {
+        let mut bytes = [0u8; 128];
+        zip_with_entry(&mut bytes, 0, b"[Content_Types].xml");
+        zip_with_entry(&mut bytes, 49, b"xl/workbook.xml");
+        assert_eq!(detect(&bytes), Some(MimeType::Xlsx));
+    }
+
+    #[test]
+    fn pptx_via_zip_entry_name() {
+        let mut bytes = [0u8; 64];
+        zip_with_entry(&mut bytes, 0, b"ppt/presentation.xml");
+        assert_eq!(detect(&bytes), Some(MimeType::Pptx));
+    }
+
+    #[test]
+    fn jar_via_zip_entry_name() {
+        let mut bytes = [0u8; 64];
+        zip_with_entry(&mut bytes, 0, b"META-INF/MANIFEST.MF");
+        assert_eq!(detect(&bytes), Some(MimeType::Jar));
+    }
+
+    #[test]
+    fn plain_zip_falls_back_to_zip() {
+        let mut bytes = [0u8; 64];
+        zip_with_entry(&mut bytes, 0, b"notes.txt");
+        assert_eq!(detect(&bytes), Some(MimeType::Zip));
+    }
+
+    #[test]
+    fn detect_all_single_match() {
+        let mut all = detect_all(&[0xFF, 0xD8, 0xFF, 0xE0]);
+        assert_eq!(all.len(), 1);
+        assert_eq!(all.next(), Some(MimeType::Jpeg));
+        assert_eq!(all.next(), None);
+    }
+
+    #[test]
+    fn detect_all_no_match_is_empty() {
+        assert_eq!(detect_all(b"hello world").count(), 0);
+    }
+
+    #[test]
+    fn detect_all_reports_zip_fallback() {
+        let mut bytes = [0u8; 64];
+        zip_with_entry(&mut bytes, 0, b"word/document.xml");
+        assert!(detect_all(&bytes).eq([MimeType::Docx, MimeType::Zip]));
+    }
+
+    #[test]
+    fn detect_all_reports_overlapping_signatures() {
+        let mut bytes = [0u8; 512];
+        bytes[..2].copy_from_slice(b"BM");
+        bytes[257..262].copy_from_slice(b"ustar");
+        assert!(detect_all(&bytes).eq([MimeType::Tar, MimeType::Bmp]));
+        assert_eq!(detect(&bytes), Some(MimeType::Tar));
+    }
+
+    #[test]
+    fn detect_all_first_match_agrees_with_detect() {
+        let inputs: [&[u8]; 5] = [
+            &[0xFF, 0xD8, 0xFF, 0xE0],
+            b"%PDF-1.4",
+            &[0x28, 0xB5, 0x2F, 0xFD],
+            &[
+                0x1A, 0x45, 0xDF, 0xA3, 0x8B, 0x42, 0x82, 0x84, b'w', b'e', b'b', b'm',
+            ],
+            b"nothing here",
+        ];
+        for input in inputs {
+            assert_eq!(detect_all(input).next(), detect(input));
+        }
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn detect_file_finds_offset_signature() {
+        let mut path = std::env::temp_dir();
+        path.push("tpt-mime-pure-detect-file-tar.bin");
+        let mut data = [0u8; 2048];
+        data[257..262].copy_from_slice(b"ustar");
+        std::fs::write(&path, &data[..]).unwrap();
+        let detected = detect_file(&path);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(detected.unwrap(), Some(MimeType::Tar));
     }
 }

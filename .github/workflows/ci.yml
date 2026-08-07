@@ -12,8 +12,17 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  audit:
+    name: Security audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
   test:
-    name: Test (${{ matrix.os }})
+    name: Test (all features, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -28,7 +37,7 @@ jobs:
       - name: fmt
         run: cargo fmt --all -- --check
 
-      - name: clippy
+      - name: clippy (all features)
         run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: test (all features)
@@ -36,6 +45,25 @@ jobs:
 
       - name: test tpt-mime-pure (no_std)
         run: cargo test --no-default-features -p tpt-mime-pure
+
+  test-default:
+    name: Test (default features, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: clippy (default features)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: test (default features)
+        run: cargo test --workspace
 
   msrv:
     name: MSRV (1.71)
@@ -46,13 +74,50 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: test (all features)
-        run: cargo test --all --all-features
+        run: cargo test --workspace --all-features --exclude tpt-cli --lib --tests
 
       - name: test tpt-mime-pure (no_std)
         run: cargo test --no-default-features -p tpt-mime-pure
 
+  doc:
+    name: Docs dry-run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo doc (all features, no deps)
+        run: cargo doc --workspace --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+
+  semver:
+    name: Semver checks
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-semver-checks
+        run: cargo install cargo-semver-checks --locked
+      - name: check
+        run: cargo semver-checks check-release --workspace
+
+  no_std:
+    name: no_std target build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabi
+      - uses: Swatinem/rust-cache@v2
+      - name: build tpt-mime-pure (no_std, bare-metal target)
+        run: cargo build -p tpt-mime-pure --no-default-features --target thumbv7em-none-eabi
+
   fuzz:
-    name: Fuzz targets (nightly, non-blocking)
+    name: Fuzz targets (nightly)
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
@@ -60,8 +125,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
       - name: Install cargo-fuzz
         run: cargo +nightly install cargo-fuzz --locked
-      - name: Build fuzz targets
+      - name: Build and short-run fuzz targets
         run: |
           for c in tpt-jsonl-stream tpt-geo-geojson tpt-logfmt-parse tpt-cron-parse tpt-mime-pure; do
             (cd "$c/fuzz" && cargo +nightly fuzz build)
+            for t in $(cd "$c/fuzz" && cargo +nightly fuzz list); do
+              (cd "$c/fuzz" && cargo +nightly fuzz run "$t" -- -max_total_time=20)
+            done
           done

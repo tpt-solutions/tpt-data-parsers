@@ -3,6 +3,9 @@
 
 use std::fmt;
 
+#[cfg(feature = "chrono")]
+use chrono::TimeZone;
+
 /// Which field of the cron expression caused a parse error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CronFieldName {
@@ -110,6 +113,14 @@ pub struct CronExpr {
 impl CronExpr {
     /// Parse a cron expression string (5-field or 6-field).
     ///
+    /// Fields may be separated by spaces or tabs. Every value is validated
+    /// against the range of its field (minutes 0-59, hours 0-23, day-of-month
+    /// 1-31, month 1-12, day-of-week 0-7 where both 0 and 7 are Sunday, seconds
+    /// 0-59), month names `JAN`-`DEC` and day names `SUN`-`SAT` are accepted
+    /// case-insensitively, and the shorthand aliases `@yearly`, `@annually`,
+    /// `@monthly`, `@weekly`, `@daily`, `@midnight` and `@hourly` are expanded
+    /// before parsing. `@reboot` is not a periodic schedule and is rejected.
+    ///
     /// # Example
     ///
     /// ```
@@ -117,10 +128,18 @@ impl CronExpr {
     ///
     /// let expr = CronExpr::parse("*/5 * * * *").unwrap();
     /// assert_eq!(expr.to_human_readable(), "Every 5 minutes");
+    ///
+    /// let expr = CronExpr::parse("@daily").unwrap();
+    /// assert_eq!(expr.to_human_readable(), "Every day at 12:00 AM");
+    ///
+    /// let expr = CronExpr::parse("0 9 * JAN MON").unwrap();
+    /// assert_eq!(expr.month, CronExpr::parse("0 9 * 1 1").unwrap().month);
+    ///
+    /// assert!(CronExpr::parse("0 99 * * *").is_err());
+    /// assert!(CronExpr::parse("* * * * 1garbage").is_err());
     /// ```
     pub fn parse(s: &str) -> Result<CronExpr, CronError> {
-        let parser = CronParser::new(s);
-        parser.parse()
+        parse_expr(s)
     }
 
     /// Returns `true` if this is a 6-field cron expression (with seconds).
@@ -162,28 +181,69 @@ impl CronExpr {
         &self,
         after: chrono::DateTime<chrono::Utc>,
     ) -> Option<chrono::DateTime<chrono::Utc>> {
+        let next = self.next_after_naive(after.naive_utc())?;
+        Some(chrono::Utc.from_utc_datetime(&next))
+    }
+
+    /// Return the first time strictly after `after` that this schedule fires,
+    /// interpreting the cron fields as wall-clock time in the timezone of
+    /// `after`.
+    ///
+    /// This is the timezone-aware variant of [`CronExpr::next_after`]: the
+    /// schedule is evaluated against the local time in `Tz`, so `0 9 * * *`
+    /// next fires at 09:00 in `Tz`, not at 09:00 UTC. Only available with the
+    /// `chrono` feature.
+    ///
+    /// ```rust,ignore
+    /// use tpt_cron_parse::CronExpr;
+    /// use chrono::{FixedOffset, TimeZone};
+    /// let expr = CronExpr::parse("0 9 * * *").unwrap();
+    /// let tz = FixedOffset::east_opt(8 * 3600).unwrap();
+    /// let after = tz.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    /// let next = expr.next_after_tz(after).unwrap(); // 09:00 in +08:00
+    /// ```
+    #[cfg(feature = "chrono")]
+    pub fn next_after_tz<Tz: chrono::TimeZone>(
+        &self,
+        after: chrono::DateTime<Tz>,
+    ) -> Option<chrono::DateTime<Tz>> {
+        let tz = after.timezone();
+        let next_naive = self.next_after_naive(after.naive_local())?;
+        tz.from_local_datetime(&next_naive)
+            .single()
+            .or_else(|| tz.from_local_datetime(&next_naive).earliest())
+    }
+
+    /// Search the wall-clock schedule forward from `after` (a naive local time)
+    /// and return the next matching `NaiveDateTime`. Shared by [`CronExpr::next_after`]
+    /// (mapped through UTC) and [`CronExpr::next_after_tz`].
+    #[cfg(feature = "chrono")]
+    fn next_after_naive(&self, after: chrono::NaiveDateTime) -> Option<chrono::NaiveDateTime> {
         use chrono::{Datelike, Timelike};
-        let seconds_set = self.seconds.as_ref().map(|s| expand_field(s, 0, 59));
-        let minutes = expand_field(&self.minutes, 0, 59);
-        let hours = expand_field(&self.hours, 0, 23);
-        let doms = expand_field(&self.dom, 1, 31);
-        let months = expand_field(&self.month, 1, 12);
-        let dows = expand_field(&self.dow, 0, 7)
+        let seconds_set = self.seconds.as_ref().map(|s| s.expand(0, 59));
+        let minutes = self.minutes.expand(0, 59);
+        let hours = self.hours.expand(0, 23);
+        let doms = self.dom.expand(1, 31);
+        let months = self.month.expand(1, 12);
+        let dows = self
+            .dow
+            .expand(0, 7)
             .into_iter()
             .map(|d| d % 7)
             .collect::<Vec<_>>();
         let dom_restricted = !is_any(&self.dom);
         let dow_restricted = !is_any(&self.dow);
-        let after_minute = after.with_second(0).unwrap().with_nanosecond(0).unwrap();
-        let mut min_start = after_minute + chrono::Duration::minutes(1);
+        let start = after.with_nanosecond(0)? + chrono::Duration::seconds(1);
+        let first_minute = start.with_second(0)?;
         let limit = after + chrono::Duration::days(4 * 366 + 1);
+        let mut cur = first_minute;
 
-        while min_start <= limit {
-            let m = min_start.minute() as u8;
-            let h = min_start.hour() as u8;
-            let dom = min_start.day() as u8;
-            let mon = min_start.month() as u8;
-            let dow = match min_start.weekday() {
+        while cur <= limit {
+            let m = cur.minute() as u8;
+            let h = cur.hour() as u8;
+            let dom = cur.day() as u8;
+            let mon = cur.month() as u8;
+            let dow = match cur.weekday() {
                 chrono::Weekday::Sun => 0,
                 chrono::Weekday::Mon => 1,
                 chrono::Weekday::Tue => 2,
@@ -200,25 +260,26 @@ impl CronExpr {
             };
 
             if minutes.contains(&m) && hours.contains(&h) && months.contains(&mon) && day_ok {
-                if let Some(secs) = &seconds_set {
-                    let same_minute = min_start == after_minute;
-                    let s0 = if same_minute {
-                        after.second() as u8 + 1
-                    } else {
-                        0
-                    };
-                    if let Some(&s) = secs.iter().find(|&&s| s >= s0) {
-                        let t = min_start.with_second(s as u32).unwrap();
-                        if t > after {
-                            return Some(t);
+                match &seconds_set {
+                    Some(secs) => {
+                        let floor = if cur == first_minute {
+                            start.second() as u8
+                        } else {
+                            0
+                        };
+                        if let Some(&s) = secs.iter().find(|&&s| s >= floor) {
+                            return cur.with_second(s as u32);
                         }
                     }
-                } else if min_start > after {
-                    return Some(min_start);
+                    None => {
+                        if cur >= start {
+                            return Some(cur);
+                        }
+                    }
                 }
             }
 
-            min_start += chrono::Duration::minutes(1);
+            cur += chrono::Duration::minutes(1);
         }
         None
     }
@@ -265,125 +326,301 @@ impl CronExpr {
     }
 }
 
-/// Expand a [`CronField`] into the sorted, de-duplicated set of values it
-/// permits within the inclusive `[min, max]` range.
-#[cfg(feature = "chrono")]
-fn expand_field(field: &CronField, min: u8, max: u8) -> Vec<u8> {
-    let mut out = match field {
-        CronField::Any => (min..=max).collect(),
-        CronField::Value(n) => vec![*n],
-        CronField::Range(a, b) => (*a..=*b).collect(),
-        CronField::Step(base, step) => {
-            let start = match base.as_ref() {
-                CronField::Any => min,
-                CronField::Value(n) => *n,
-                CronField::Range(a, _) => *a,
-                _ => min,
-            };
-            let mut vals = Vec::new();
-            let mut v = start;
-            while v <= max {
-                vals.push(v);
+impl CronField {
+    /// Expand this field into the sorted, de-duplicated set of values it permits
+    /// within the inclusive `[min, max]` bounds. Values outside the bounds are
+    /// clamped away, and a zero step yields no values.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use tpt_cron_parse::CronExpr;
+    ///
+    /// let expr = CronExpr::parse("0 1-5/2 * * *").unwrap();
+    /// assert_eq!(expr.hours.expand(0, 23), vec![1, 3, 5]);
+    /// ```
+    pub fn expand(&self, min: u8, max: u8) -> Vec<u8> {
+        let mut out = Vec::new();
+        self.expand_into(min, max, &mut out);
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    fn expand_into(&self, min: u8, max: u8, out: &mut Vec<u8>) {
+        match self {
+            CronField::Any => out.extend(min..=max),
+            CronField::Value(n) => {
+                if *n >= min && *n <= max {
+                    out.push(*n);
+                }
+            }
+            CronField::Range(a, b) => {
+                let (lo, hi) = ((*a).max(min), (*b).min(max));
+                if lo <= hi {
+                    out.extend(lo..=hi);
+                }
+            }
+            CronField::Step(base, step) => {
                 if *step == 0 {
-                    break;
+                    return;
                 }
-                match v.checked_add(*step) {
-                    Some(n) => v = n,
-                    None => break,
+                let (start, end) = match base.as_ref() {
+                    CronField::Any => (min, max),
+                    CronField::Value(n) => ((*n).max(min), max),
+                    CronField::Range(a, b) => ((*a).max(min), (*b).min(max)),
+                    other => {
+                        let vals = other.expand(min, max);
+                        out.extend(vals.into_iter().step_by(*step as usize));
+                        return;
+                    }
+                };
+                let mut v = start;
+                while v <= end {
+                    out.push(v);
+                    match v.checked_add(*step) {
+                        Some(n) => v = n,
+                        None => break,
+                    }
                 }
             }
-            vals
-        }
-        CronField::List(items) => {
-            let mut vals = Vec::new();
-            for it in items {
-                vals.extend(expand_field(it, min, max));
+            CronField::List(items) => {
+                for it in items {
+                    it.expand_into(min, max, out);
+                }
             }
-            vals
         }
-    };
-    out.sort_unstable();
-    out.dedup();
-    out
+    }
 }
 
 // ---- Parser internals ----
 
-struct CronParser<'a> {
-    input: &'a str,
-    pos: usize,
+const MONTH_NAMES: [&str; 12] = [
+    "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
+];
+
+const DOW_NAMES: [&str; 7] = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
+
+const SHORTHANDS: [(&str, &str); 7] = [
+    ("@yearly", "0 0 1 1 *"),
+    ("@annually", "0 0 1 1 *"),
+    ("@monthly", "0 0 1 * *"),
+    ("@weekly", "0 0 * * 0"),
+    ("@daily", "0 0 * * *"),
+    ("@midnight", "0 0 * * *"),
+    ("@hourly", "0 * * * *"),
+];
+
+fn field_bounds(field: CronFieldName) -> (u8, u8) {
+    match field {
+        CronFieldName::Seconds | CronFieldName::Minutes => (0, 59),
+        CronFieldName::Hours => (0, 23),
+        CronFieldName::DayOfMonth => (1, 31),
+        CronFieldName::Month => (1, 12),
+        CronFieldName::DayOfWeek => (0, 7),
+    }
 }
 
-impl<'a> CronParser<'a> {
-    fn new(input: &'a str) -> Self {
-        Self { input, pos: 0 }
+fn field_expected(field: CronFieldName) -> &'static str {
+    match field {
+        CronFieldName::Seconds | CronFieldName::Minutes => "value 0-59",
+        CronFieldName::Hours => "value 0-23",
+        CronFieldName::DayOfMonth => "value 1-31",
+        CronFieldName::Month => "value 1-12 or name JAN-DEC",
+        CronFieldName::DayOfWeek => "value 0-7 or name SUN-SAT",
     }
+}
 
-    fn peek(&self) -> Option<char> {
-        self.input[self.pos..].chars().next()
+fn named_value(field: CronFieldName, name: &str) -> Option<u8> {
+    match field {
+        CronFieldName::Month => MONTH_NAMES
+            .iter()
+            .position(|n| name.eq_ignore_ascii_case(n))
+            .map(|i| i as u8 + 1),
+        CronFieldName::DayOfWeek => DOW_NAMES
+            .iter()
+            .position(|n| name.eq_ignore_ascii_case(n))
+            .map(|i| i as u8),
+        _ => None,
     }
+}
 
-    fn skip_whitespace(&mut self) {
-        while self.pos < self.input.len() && self.input.as_bytes()[self.pos] == b' ' {
-            self.pos += 1;
+fn split_fields(input: &str) -> Vec<(usize, &str)> {
+    let bytes = input.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let start = i;
+        while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i > start {
+            out.push((start, &input[start..i]));
+        }
+    }
+    out
+}
+
+fn expand_shorthand(token: &str, position: usize) -> Result<&'static str, CronError> {
+    if let Some((_, expansion)) = SHORTHANDS
+        .iter()
+        .find(|(name, _)| token.eq_ignore_ascii_case(name))
+    {
+        return Ok(expansion);
+    }
+    let expected = if token.eq_ignore_ascii_case("@reboot") {
+        "a periodic schedule (@reboot has no next run time and is not supported)"
+    } else {
+        "one of @yearly, @annually, @monthly, @weekly, @daily, @midnight, @hourly"
+    };
+    Err(CronError {
+        position,
+        field: CronFieldName::Minutes,
+        expected,
+        found: token.chars().next(),
+    })
+}
+
+fn parse_expr(input: &str) -> Result<CronExpr, CronError> {
+    let fields = split_fields(input);
+
+    if let Some(&(offset, token)) = fields.first() {
+        if token.starts_with('@') {
+            if let Some(&(pos, rest)) = fields.get(1) {
+                return Err(CronError {
+                    position: pos,
+                    field: CronFieldName::Minutes,
+                    expected: "end of input after a shorthand alias",
+                    found: rest.chars().next(),
+                });
+            }
+            return parse_expr(expand_shorthand(token, offset)?);
         }
     }
 
-    fn parse_u8(&mut self, field: CronFieldName) -> Result<u8, CronError> {
+    if fields.len() != 5 && fields.len() != 6 {
+        return Err(CronError {
+            position: 0,
+            field: CronFieldName::Minutes,
+            expected: "5 or 6 whitespace-separated fields",
+            found: None,
+        });
+    }
+
+    let is_6 = fields.len() == 6;
+    let base = usize::from(is_6);
+    let seconds = if is_6 {
+        Some(parse_one(fields[0], CronFieldName::Seconds)?)
+    } else {
+        None
+    };
+    let minutes = parse_one(fields[base], CronFieldName::Minutes)?;
+    let hours = parse_one(fields[base + 1], CronFieldName::Hours)?;
+    let dom = parse_one(fields[base + 2], CronFieldName::DayOfMonth)?;
+    let month = parse_one(fields[base + 3], CronFieldName::Month)?;
+    let dow = parse_one(fields[base + 4], CronFieldName::DayOfWeek)?;
+
+    Ok(CronExpr {
+        seconds,
+        minutes,
+        hours,
+        dom,
+        month,
+        dow,
+    })
+}
+
+fn parse_one((offset, text): (usize, &str), field: CronFieldName) -> Result<CronField, CronError> {
+    FieldParser {
+        text,
+        offset,
+        pos: 0,
+        field,
+    }
+    .parse()
+}
+
+struct FieldParser<'a> {
+    text: &'a str,
+    offset: usize,
+    pos: usize,
+    field: CronFieldName,
+}
+
+impl FieldParser<'_> {
+    fn byte(&self) -> Option<u8> {
+        self.text.as_bytes().get(self.pos).copied()
+    }
+
+    fn error(&self, expected: &'static str) -> CronError {
+        self.error_at(self.pos, expected)
+    }
+
+    fn error_at(&self, position: usize, expected: &'static str) -> CronError {
+        CronError {
+            position: self.offset + position,
+            field: self.field,
+            expected,
+            found: self.text[position..].chars().next(),
+        }
+    }
+
+    fn parse_number(&mut self, expected: &'static str) -> Result<u8, CronError> {
         let start = self.pos;
-        while self.pos < self.input.len() && self.input.as_bytes()[self.pos].is_ascii_digit() {
+        while self.byte().is_some_and(|b| b.is_ascii_digit()) {
             self.pos += 1;
         }
         if self.pos == start {
-            return Err(CronError {
-                position: self.pos,
-                field,
-                expected: "digit",
-                found: self.peek(),
-            });
+            return Err(self.error(expected));
         }
-        self.input[start..self.pos]
+        self.text[start..self.pos]
             .parse::<u8>()
-            .map_err(|_| CronError {
-                position: start,
-                field,
-                expected: "number 0-255",
-                found: None,
-            })
+            .map_err(|_| self.error_at(start, expected))
     }
 
-    fn parse_field(&mut self, field: CronFieldName) -> Result<CronField, CronError> {
-        let mut items: Vec<CronField> = Vec::new();
-        loop {
-            let item = self.parse_item(field)?;
-            items.push(item);
-            if self.pos < self.input.len() && self.input.as_bytes()[self.pos] == b',' {
+    fn parse_value(&mut self) -> Result<u8, CronError> {
+        let expected = field_expected(self.field);
+        let start = self.pos;
+
+        if self.byte().is_some_and(|b| b.is_ascii_alphabetic()) {
+            while self.byte().is_some_and(|b| b.is_ascii_alphabetic()) {
                 self.pos += 1;
-            } else {
-                break;
             }
+            let name = &self.text[start..self.pos];
+            return match named_value(self.field, name) {
+                Some(v) => Ok(v),
+                None => {
+                    self.pos = start;
+                    Err(self.error(expected))
+                }
+            };
         }
-        if items.len() == 1 {
-            Ok(items.remove(0))
-        } else {
-            Ok(CronField::List(items))
+
+        let value = self.parse_number(expected)?;
+        let (min, max) = field_bounds(self.field);
+        if value < min || value > max {
+            return Err(self.error_at(start, expected));
         }
+        Ok(value)
     }
 
-    fn parse_item(&mut self, field: CronFieldName) -> Result<CronField, CronError> {
-        let base = if self.pos < self.input.len() && self.input.as_bytes()[self.pos] == b'*' {
+    fn parse_item(&mut self) -> Result<CronField, CronError> {
+        let base = if self.byte() == Some(b'*') {
             self.pos += 1;
             CronField::Any
         } else {
             let n_start = self.pos;
-            let n = self.parse_u8(field)?;
-            if self.pos < self.input.len() && self.input.as_bytes()[self.pos] == b'-' {
+            let n = self.parse_value()?;
+            if self.byte() == Some(b'-') {
                 self.pos += 1;
-                let end = self.parse_u8(field)?;
+                let end = self.parse_value()?;
                 if n > end {
                     return Err(CronError {
-                        position: n_start,
-                        field,
+                        position: self.offset + n_start,
+                        field: self.field,
                         expected: "ascending range (start <= end)",
                         found: Some('-'),
                     });
@@ -394,66 +631,37 @@ impl<'a> CronParser<'a> {
             }
         };
 
-        if self.pos < self.input.len() && self.input.as_bytes()[self.pos] == b'/' {
+        if self.byte() == Some(b'/') {
             self.pos += 1;
             let step_start = self.pos;
-            let step = self.parse_u8(field)?;
+            let step = self.parse_number("non-zero step value")?;
             if step == 0 {
-                return Err(CronError {
-                    position: step_start,
-                    field,
-                    expected: "non-zero step value",
-                    found: Some('0'),
-                });
+                return Err(self.error_at(step_start, "non-zero step value"));
             }
-            Ok(CronField::Step(Box::new(base), step))
-        } else {
-            Ok(base)
+            return Ok(CronField::Step(Box::new(base), step));
         }
+        Ok(base)
     }
 
-    fn parse(mut self) -> Result<CronExpr, CronError> {
-        self.skip_whitespace();
-
-        // Count fields to detect 5 vs 6
-        let fields: Vec<&str> = self.input.split_whitespace().collect();
-        if fields.len() != 5 && fields.len() != 6 {
-            return Err(CronError {
-                position: 0,
-                field: CronFieldName::Minutes,
-                expected: "5 or 6 whitespace-separated fields",
-                found: None,
-            });
+    fn parse(mut self) -> Result<CronField, CronError> {
+        let mut items: Vec<CronField> = Vec::new();
+        loop {
+            let item = self.parse_item()?;
+            items.push(item);
+            if self.byte() == Some(b',') {
+                self.pos += 1;
+            } else {
+                break;
+            }
         }
-
-        let is_6 = fields.len() == 6;
-
-        let seconds = if is_6 {
-            let f = self.parse_field(CronFieldName::Seconds)?;
-            self.skip_whitespace();
-            Some(f)
+        if self.pos != self.text.len() {
+            return Err(self.error("',' or end of field"));
+        }
+        if items.len() == 1 {
+            Ok(items.remove(0))
         } else {
-            None
-        };
-
-        let minutes = self.parse_field(CronFieldName::Minutes)?;
-        self.skip_whitespace();
-        let hours = self.parse_field(CronFieldName::Hours)?;
-        self.skip_whitespace();
-        let dom = self.parse_field(CronFieldName::DayOfMonth)?;
-        self.skip_whitespace();
-        let month = self.parse_field(CronFieldName::Month)?;
-        self.skip_whitespace();
-        let dow = self.parse_field(CronFieldName::DayOfWeek)?;
-
-        Ok(CronExpr {
-            seconds,
-            minutes,
-            hours,
-            dom,
-            month,
-            dow,
-        })
+            Ok(CronField::List(items))
+        }
     }
 }
 
@@ -731,13 +939,46 @@ mod tests {
     #[cfg(feature = "chrono")]
     #[test]
     fn next_after_6field_seconds() {
-        use chrono::{TimeZone, Timelike, Utc};
+        use chrono::{Datelike, TimeZone, Timelike, Utc};
         let expr = CronExpr::parse("30 0 9 * * *").unwrap();
         let after = Utc.with_ymd_and_hms(2024, 6, 1, 9, 0, 0).unwrap();
         let next = expr.next_after(after).unwrap();
+        assert_eq!(next.day(), 1);
         assert_eq!(next.hour(), 9);
         assert_eq!(next.minute(), 0);
         assert_eq!(next.second(), 30);
+    }
+
+    #[cfg(feature = "chrono")]
+    #[test]
+    fn next_after_6field_every_second() {
+        use chrono::{TimeZone, Utc};
+        let expr = CronExpr::parse("*/1 * * * * *").unwrap();
+        let after = Utc.with_ymd_and_hms(2024, 6, 1, 9, 0, 0).unwrap();
+        let next = expr.next_after(after).unwrap();
+        assert_eq!(next, Utc.with_ymd_and_hms(2024, 6, 1, 9, 0, 1).unwrap());
+    }
+
+    #[cfg(feature = "chrono")]
+    #[test]
+    fn next_after_6field_same_minute_later_second() {
+        use chrono::{TimeZone, Utc};
+        let expr = CronExpr::parse("0,30 * * * * *").unwrap();
+        let after = Utc.with_ymd_and_hms(2024, 6, 1, 9, 0, 10).unwrap();
+        let next = expr.next_after(after).unwrap();
+        assert_eq!(next, Utc.with_ymd_and_hms(2024, 6, 1, 9, 0, 30).unwrap());
+        let next = expr.next_after(next).unwrap();
+        assert_eq!(next, Utc.with_ymd_and_hms(2024, 6, 1, 9, 1, 0).unwrap());
+    }
+
+    #[cfg(feature = "chrono")]
+    #[test]
+    fn next_after_5field_skips_current_minute() {
+        use chrono::{TimeZone, Utc};
+        let expr = CronExpr::parse("* * * * *").unwrap();
+        let after = Utc.with_ymd_and_hms(2024, 6, 1, 9, 0, 0).unwrap();
+        let next = expr.next_after(after).unwrap();
+        assert_eq!(next, Utc.with_ymd_and_hms(2024, 6, 1, 9, 1, 0).unwrap());
     }
 
     #[cfg(feature = "chrono")]
@@ -748,6 +989,32 @@ mod tests {
         let expr = CronExpr::parse("0 0 30 2 *").unwrap();
         let after = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
         assert!(expr.next_after(after).is_none());
+    }
+
+    #[cfg(feature = "chrono")]
+    #[test]
+    fn next_after_tz_uses_local_wall_clock() {
+        use chrono::{FixedOffset, TimeZone, Utc};
+        let expr = CronExpr::parse("0 9 * * *").unwrap();
+        // Same UTC instant, but interpreted in +08:00: the next 09:00 local
+        // time is 01:00 UTC the same day, whereas in UTC it is 09:00 UTC.
+        let tz = FixedOffset::east_opt(8 * 3600).unwrap();
+        let after_utc = Utc.with_ymd_and_hms(2024, 6, 1, 0, 30, 0).unwrap();
+        let after_tz = tz.from_utc_datetime(&after_utc.naive_utc());
+
+        let next_utc = expr.next_after(after_utc).unwrap();
+        let next_tz = expr.next_after_tz(after_tz).unwrap();
+        assert_eq!(next_utc, Utc.with_ymd_and_hms(2024, 6, 1, 9, 0, 0).unwrap());
+        assert_eq!(next_tz, tz.with_ymd_and_hms(2024, 6, 1, 9, 0, 0).unwrap());
+    }
+
+    #[cfg(feature = "chrono")]
+    #[test]
+    fn next_after_tz_matches_next_after_for_utc() {
+        use chrono::{TimeZone, Utc};
+        let expr = CronExpr::parse("0 9 * * 1-5").unwrap();
+        let after = Utc.with_ymd_and_hms(2024, 6, 1, 0, 0, 0).unwrap();
+        assert_eq!(expr.next_after(after), expr.next_after_tz(after));
     }
 
     #[cfg(feature = "chrono")]
@@ -780,5 +1047,227 @@ mod tests {
     fn valid_ascending_range_ok() {
         let e = CronExpr::parse("0 5-9 * * *").unwrap();
         assert_eq!(e.hours, CronField::Range(5, 9));
+    }
+
+    #[test]
+    fn out_of_range_minutes_rejected() {
+        let err = CronExpr::parse("60 * * * *").unwrap_err();
+        assert_eq!(err.field, CronFieldName::Minutes);
+        assert_eq!(err.expected, "value 0-59");
+        assert_eq!(err.position, 0);
+    }
+
+    #[test]
+    fn out_of_range_hours_rejected() {
+        let err = CronExpr::parse("0 99 * * *").unwrap_err();
+        assert_eq!(err.field, CronFieldName::Hours);
+        assert_eq!(err.expected, "value 0-23");
+        assert_eq!(err.position, 2);
+        assert_eq!(err.found, Some('9'));
+    }
+
+    #[test]
+    fn out_of_range_day_of_month_rejected() {
+        assert_eq!(
+            CronExpr::parse("0 0 0 * *").unwrap_err().field,
+            CronFieldName::DayOfMonth
+        );
+        assert_eq!(
+            CronExpr::parse("0 0 32 * *").unwrap_err().field,
+            CronFieldName::DayOfMonth
+        );
+    }
+
+    #[test]
+    fn out_of_range_month_rejected() {
+        assert_eq!(
+            CronExpr::parse("0 0 1 0 *").unwrap_err().field,
+            CronFieldName::Month
+        );
+        assert_eq!(
+            CronExpr::parse("0 0 1 13 *").unwrap_err().field,
+            CronFieldName::Month
+        );
+    }
+
+    #[test]
+    fn out_of_range_day_of_week_rejected() {
+        let err = CronExpr::parse("0 0 * * 8").unwrap_err();
+        assert_eq!(err.field, CronFieldName::DayOfWeek);
+        assert_eq!(err.expected, "value 0-7 or name SUN-SAT");
+    }
+
+    #[test]
+    fn out_of_range_seconds_rejected() {
+        let err = CronExpr::parse("60 0 0 * * *").unwrap_err();
+        assert_eq!(err.field, CronFieldName::Seconds);
+        assert_eq!(err.expected, "value 0-59");
+    }
+
+    #[test]
+    fn out_of_range_inside_list_and_range_rejected() {
+        assert!(CronExpr::parse("0 1,24 * * *").is_err());
+        assert!(CronExpr::parse("0 20-24 * * *").is_err());
+        assert!(CronExpr::parse("0 300 * * *").is_err());
+    }
+
+    #[test]
+    fn day_of_week_seven_is_allowed() {
+        let e = CronExpr::parse("0 0 * * 7").unwrap();
+        assert_eq!(e.dow, CronField::Value(7));
+        assert_eq!(e.to_human_readable(), "Every Sunday at 12:00 AM");
+    }
+
+    #[test]
+    fn trailing_garbage_rejected() {
+        let err = CronExpr::parse("* * * * 1garbage").unwrap_err();
+        assert_eq!(err.field, CronFieldName::DayOfWeek);
+        assert_eq!(err.expected, "',' or end of field");
+        assert_eq!(err.position, 9);
+        assert_eq!(err.found, Some('g'));
+        assert!(CronExpr::parse("* * * * *DROP TABLE").is_err());
+        assert!(CronExpr::parse("* * * * *;").is_err());
+        assert!(CronExpr::parse("*/5 * * * *x").is_err());
+    }
+
+    #[test]
+    fn tab_separated_fields_parse() {
+        let tabbed = CronExpr::parse("0\t9\t*\t*\t1").unwrap();
+        assert_eq!(tabbed, CronExpr::parse("0 9 * * 1").unwrap());
+        assert_eq!(tabbed.to_human_readable(), "Every Monday at 9:00 AM");
+        let mixed = CronExpr::parse(" 30\t0 \t9 * * *\t").unwrap();
+        assert!(mixed.is_6_field());
+        assert_eq!(mixed.seconds, Some(CronField::Value(30)));
+    }
+
+    #[test]
+    fn step_over_range_stops_at_range_end() {
+        let e = CronExpr::parse("0 1-5/2 * * *").unwrap();
+        assert_eq!(e.hours.expand(0, 23), vec![1, 3, 5]);
+    }
+
+    #[test]
+    fn step_over_value_runs_to_field_max() {
+        let e = CronExpr::parse("5/15 * * * *").unwrap();
+        assert_eq!(e.minutes.expand(0, 59), vec![5, 20, 35, 50]);
+    }
+
+    #[test]
+    fn step_over_wildcard_covers_whole_field() {
+        let e = CronExpr::parse("0 */6 * * *").unwrap();
+        assert_eq!(e.hours.expand(0, 23), vec![0, 6, 12, 18]);
+    }
+
+    #[test]
+    fn shorthand_aliases_expand() {
+        assert_eq!(
+            CronExpr::parse("@hourly").unwrap(),
+            CronExpr::parse("0 * * * *").unwrap()
+        );
+        assert_eq!(
+            CronExpr::parse("@daily").unwrap(),
+            CronExpr::parse("0 0 * * *").unwrap()
+        );
+        assert_eq!(
+            CronExpr::parse("@midnight").unwrap(),
+            CronExpr::parse("0 0 * * *").unwrap()
+        );
+        assert_eq!(
+            CronExpr::parse("@weekly").unwrap(),
+            CronExpr::parse("0 0 * * 0").unwrap()
+        );
+        assert_eq!(
+            CronExpr::parse("@monthly").unwrap(),
+            CronExpr::parse("0 0 1 * *").unwrap()
+        );
+        assert_eq!(
+            CronExpr::parse("@yearly").unwrap(),
+            CronExpr::parse("0 0 1 1 *").unwrap()
+        );
+        assert_eq!(
+            CronExpr::parse("@annually").unwrap(),
+            CronExpr::parse("0 0 1 1 *").unwrap()
+        );
+    }
+
+    #[test]
+    fn shorthand_is_case_insensitive_and_trimmed() {
+        let e = CronExpr::parse("  @DaIlY \t").unwrap();
+        assert_eq!(e.to_human_readable(), "Every day at 12:00 AM");
+    }
+
+    #[test]
+    fn reboot_shorthand_rejected() {
+        let err = CronExpr::parse("@reboot").unwrap_err();
+        assert_eq!(
+            err.expected,
+            "a periodic schedule (@reboot has no next run time and is not supported)"
+        );
+        assert_eq!(err.found, Some('@'));
+        assert_eq!(err.position, 0);
+    }
+
+    #[test]
+    fn unknown_shorthand_rejected() {
+        let err = CronExpr::parse("@never").unwrap_err();
+        assert_eq!(
+            err.expected,
+            "one of @yearly, @annually, @monthly, @weekly, @daily, @midnight, @hourly"
+        );
+        let err = CronExpr::parse("@daily 0 0 * * *").unwrap_err();
+        assert_eq!(err.expected, "end of input after a shorthand alias");
+    }
+
+    #[test]
+    fn named_months_parse() {
+        let e = CronExpr::parse("0 0 1 JAN *").unwrap();
+        assert_eq!(e.month, CronField::Value(1));
+        assert_eq!(e.to_human_readable(), "At 12:00 AM on January 1st");
+        let e = CronExpr::parse("0 0 1 dec *").unwrap();
+        assert_eq!(e.month, CronField::Value(12));
+        let e = CronExpr::parse("0 0 1 Jan-Mar *").unwrap();
+        assert_eq!(e.month, CronField::Range(1, 3));
+        let e = CronExpr::parse("0 0 1 JAN,JUL *").unwrap();
+        assert_eq!(
+            e.month,
+            CronField::List(vec![CronField::Value(1), CronField::Value(7)])
+        );
+    }
+
+    #[test]
+    fn named_days_of_week_parse() {
+        let e = CronExpr::parse("0 9 * * MON").unwrap();
+        assert_eq!(e.dow, CronField::Value(1));
+        assert_eq!(e.to_human_readable(), "Every Monday at 9:00 AM");
+        let e = CronExpr::parse("0 9 * * sun").unwrap();
+        assert_eq!(e.dow, CronField::Value(0));
+        let e = CronExpr::parse("0 9 * * Mon-Fri").unwrap();
+        assert_eq!(e.dow, CronField::Range(1, 5));
+        let e = CronExpr::parse("0 9 * * SAT,SUN").unwrap();
+        assert_eq!(
+            e.dow,
+            CronField::List(vec![CronField::Value(6), CronField::Value(0)])
+        );
+        let e = CronExpr::parse("0 9 * * MON-FRI/2").unwrap();
+        assert_eq!(e.dow.expand(0, 7), vec![1, 3, 5]);
+    }
+
+    #[test]
+    fn unknown_names_rejected() {
+        let err = CronExpr::parse("0 0 1 FOO *").unwrap_err();
+        assert_eq!(err.field, CronFieldName::Month);
+        assert_eq!(err.expected, "value 1-12 or name JAN-DEC");
+        assert_eq!(err.found, Some('F'));
+        let err = CronExpr::parse("0 9 * * FUN").unwrap_err();
+        assert_eq!(err.field, CronFieldName::DayOfWeek);
+        assert_eq!(err.expected, "value 0-7 or name SUN-SAT");
+    }
+
+    #[test]
+    fn names_not_allowed_in_numeric_fields() {
+        let err = CronExpr::parse("MON 9 * * *").unwrap_err();
+        assert_eq!(err.field, CronFieldName::Minutes);
+        assert_eq!(err.found, Some('M'));
+        assert!(CronExpr::parse("0 JAN * * *").is_err());
     }
 }

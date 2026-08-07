@@ -126,20 +126,20 @@
 - [x] Evaluate optional serde support: kept `MimeType`/`CronExpr`/`CronField` dep-free (zero-dependency is a hard crate convention); `tpt-geo-geojson` already derives `Serialize`
 
 ## Phase 11: Doc rot & bug fixes (from 2026-08-08 platform review)
-- [ ] Write missing `CONTRIBUTING.md` (README.md links to it and Phase 9 marked it done, but it was never created)
-- [ ] Fix stale MSRV references: README.md and AGENTS.md say "MSRV 1.70"; root `Cargo.toml`/CI `msrv` job actually use 1.71
+- [x] Write missing `CONTRIBUTING.md` (README.md links to it and Phase 9 marked it done, but it was never created)
+- [x] Fix stale MSRV references: README.md and AGENTS.md say "MSRV 1.70"; root `Cargo.toml`/CI `msrv` job actually use 1.71 (verify: all docs now state 1.71)
 
 ## Phase 12: Adoption & discoverability
-- [ ] Add `[package.metadata.docs.rs] all-features = true` to `tpt-cron-parse/Cargo.toml` and `tpt-jsonl-stream/Cargo.toml` so docs.rs shows `next_after` and the `simd` feature
-- [ ] Add a CI status badge (ci.yml) to root `README.md` — works pre-publish, unlike the crates.io/docs.rs badges
-- [ ] Add a short "vs. alternatives" line to each crate `README.md` (why this crate over `cron`/`geojson`/`mime_guess`/etc.)
+- [x] Add `[package.metadata.docs.rs] all-features = true` to `tpt-cron-parse/Cargo.toml` and `tpt-jsonl-stream/Cargo.toml` so docs.rs shows `next_after` and the `simd` feature
+- [x] Add a CI status badge (ci.yml) to root `README.md` — works pre-publish, unlike the crates.io/docs.rs badges
+- [x] Add a short "vs. alternatives" line to each crate `README.md` (why this crate over `cron`/`geojson`/`mime_guess`/etc.)
 
 ## Phase 13: Automation & quality scaffolding
 - [x] Add Criterion benchmarks (`benches/`) to all 5 crates to substantiate the "zero-allocation/ultra-fast" claims
 - [x] Add `cargo-fuzz` targets for all 5 crates + a nightly, non-blocking CI smoke-test job
-- [ ] Manual/deferred: add Dependabot auto-merge workflow for passing patch-level bumps
-- [ ] Manual/deferred: merge open Dependabot PRs (`serde` 1.0.229, `serde_json` 1.0.151)
-- [ ] Manual/deferred: delete stale merged remote branches (`claude/crates-io-publish-check-cp1o6v`, `claude/crates-io-readiness-ljshrm`)
+- [x] Manual/deferred: add Dependabot auto-merge workflow for passing patch-level bumps (`.github/workflows/dependabot-auto-merge.yml`)
+- [x] Manual/deferred: merge open Dependabot PRs (`serde` 1.0.229, `serde_json` 1.0.151) — merged into `master` and pushed
+- [x] Manual/deferred: delete stale merged remote branches (`claude/crates-io-publish-check-cp1o6v`, `claude/crates-io-readiness-ljshrm`) — deleted from `origin`
 
 ## Phase 14: v0.3.0 feature candidates
 - [x] `tpt-logfmt-parse`: add `write_logfmt` — the only crate in the workspace without a writer (mirrors `JsonlWriter`/`to_json`)
@@ -159,3 +159,89 @@
 - [x] `tpt-mime-pure`: reconcile doc vs spec — `detect` doc says "first 512 bytes" but `docs/spec.txt` promises "first 8KB"; bump `detect_file` buffer to 8 KB and update doc comments
 - [x] Write `CHANGELOG.md` for each crate (Keep a Changelog format) covering the 0.2.0 baseline, Phase 7 fixes, and Phase 10 features (Phase 6 item 93 was falsely marked done)
 - [x] Bump workspace `version.workspace` to `0.2.0` (Phase 10 features ship before first publish; AGENTS.md requires bumping before publish)
+
+## Phase 17: Bug fixes & doc/changelog hygiene (2026-08-08 review)
+- [x] `tpt-mime-pure`: fix incorrect Zstandard magic-byte signature — `detect()` checks for `[0x28, 0x4D, 0x18, 0x09]` (`src/lib.rs:331`, and the test at `:543` encodes the same wrong bytes), but real `.zst` files start with `28 B5 2F FD` (magic number `0xFD2FB528`, little-endian). Every real zstd-compressed file is currently misdetected as unknown type.
+- [x] `tpt-logfmt-parse`: fix `write_logfmt`/`format_pair` not escaping control characters — `needs_quoting`/`quote_token` (`src/lib.rs:302-321`) only trigger/escape on space, `"`, `\`, `=`; a value containing a raw `\n` or `\t` is either emitted completely unquoted (breaking the single-line invariant) or copied verbatim inside quotes instead of being encoded as `\n`/`\t` — asymmetric with the parser, which *does* decode `\n`/`\t` escapes (`:234-235`). Round-tripping such a value through `write_logfmt` → `parse_to_map` corrupts data; unescaped raw newlines from attacker-controlled strings are also a log-injection (CWE-117) vector.
+- [x] `tpt-cron-parse`: add per-field range validation — `parse_u8`/`parse_item` (`src/lib.rs:332-413`) accept any `u8` (0-255) with no bounds check, so e.g. `"0 99 * * *"` parses successfully; `to_human_readable()` then prints nonsense, and under the `chrono` feature `next_after`/`upcoming` silently run their full bounded ~4-year/2.1M-minute search (the search itself is correctly bounded, not infinite — but a malformed field should fail fast with a `CronError` instead of paying that cost). No existing test covers rejection of out-of-range field values.
+- [x] `tpt-geo-geojson`: `bbox` on a bare top-level `Geometry` (not wrapped in a `Feature`/`FeatureCollection`) is silently discarded — `parse_geometry` never calls `collect_extra`, so `to_json` won't reproduce it. RFC 7946 permits `bbox` on any GeoJSON object; today only Feature/FeatureCollection round-trip it.
+- [x] Backfill `CHANGELOG.md` entries — `write_logfmt`, `CronExpr::upcoming`, and the new mime signatures (Zstd/XZ/WOFF/WOFF2/JavaClass) shipped but have zero mentions in any crate's `CHANGELOG.md` (all stop at `[0.2.0]`), despite `TODO.md` Phase 14 labeling them "v0.3.0 feature candidates."
+- [x] Remove tracked duplicate file `TODO 1260713.md` at repo root (a second stray auto-numbered copy, same class of issue as the `TODO 1260715.md` already cleaned up in Phase 8).
+
+## Phase 18: CI & supply-chain automation
+- [x] Add a `cargo-deny` or `cargo-audit` CI job — nothing today checks for vulnerable dependencies or license drift; `hygiene.yml` only checks commit metadata, not supply-chain health.
+- [x] Add a `cargo-semver-checks` gate before/within `publish.yml` — a breaking change could currently be published under a patch/minor bump with nothing catching it across 5 independently-versioned public crates.
+- [x] Add a `cargo doc --no-deps` dry-run CI job per crate so a broken `#![doc = include_str!("../README.md")]` or intra-doc link is caught before it breaks the docs.rs build post-publish.
+
+## Phase 19: Adoption & CLI ergonomics
+- [x] `tpt-cli`: accept stdin (`-` or piped input) for `mime`/`geojson`/`jsonl`, not just file paths — breaks the standard Unix pipeline idiom (`cat f | tpt jsonl`) that a CLI wrapping stream parsers should support.
+- [x] `tpt-cli`: add a `--json`/`--format` output flag — every subcommand currently `println!`s ad-hoc human text with no machine-readable mode, which undercuts scripting/CI use.
+- [x] `tpt-cli`: add shell-completion generation (`clap_complete`).
+- [x] `tpt-cli`: distribute prebuilt binaries (e.g. `cargo-dist` release workflow) — today the only install path is cloning the full workspace and `cargo install --path tpt-cli`, a real barrier for non-Rust-dev users who just want a `mime`/`cron` utility.
+- [x] Add one example composing 2+ crates together (e.g. `tpt-mime-pure::detect` routing bytes to the matching parser) — all current per-crate examples are minimal single-crate demos; a composed example is the natural next step given the README already sells a "which crate do I need" decision path.
+- [x] `tpt-cli`: add a `tpt sniff <path>` command that runs mime detection first and auto-dispatches to the matching parser subcommand — directly composes the existing crates with zero new dependencies.
+
+## Phase 20: v0.4.0 feature candidates (non-blocking backlog)
+- [x] `tpt-cron-parse`: `@daily`/`@hourly`/`@weekly`/`@monthly`/`@yearly`/`@reboot` shorthand aliases (pure string preprocessing, zero new deps).
+- [x] `tpt-cron-parse`: named months/days-of-week (`JAN`, `MON`, ...) in addition to numeric fields (zero new deps).
+- [x] `tpt-cron-parse`: timezone-aware `next_after_tz` variant gated behind a new optional `chrono-tz` feature (mirrors the existing `chrono` feature pattern; new optional dep, not mandatory).
+- [x] `tpt-mime-pure`: inspect ZIP-internal entry names to distinguish docx/xlsx/pptx/jar from plain ZIP (same technique already used for the ftyp/EBML brand checks; zero new deps).
+- [x] `tpt-mime-pure`: `detect_all(bytes) -> Vec<MimeType>` to surface ambiguous/overlapping signature matches instead of silently picking the first (zero new deps).
+- [x] `tpt-jsonl-stream`: typed iterator (`JsonlReader::into_typed::<T>()` or similar) so callers stop manually calling `serde_json::from_value` on every yielded `Value` (zero new deps, symmetric with the existing generic writer).
+- [x] `tpt-jsonl-stream`: optional `tokio` feature for `AsyncBufRead` streaming (new optional dep, gated like `simd`).
+- [x] `tpt-geo-geojson`: `Geometry::bounding_box()` computed from a geometry's own positions (zero new deps).
+- [x] `tpt-geo-geojson`: point-in-polygon (`Geometry::contains(&Position)`, ray-casting, hole-aware) — natural fit given `Polygon`'s ring structure is already modeled (zero new deps).
+- [x] `tpt-logfmt-parse`: `LogfmtLinesReader<R: BufRead>` mirroring `JsonlReader`'s shape for multi-line logfmt sources (Heroku router logs, etc.) — the biggest gap here since only single-line parsing exists today (zero new deps).
+- [x] `tpt-logfmt-parse`: `parse_to_pairs()` as an order/duplicate-preserving sibling to `parse_to_map` (`HashMap` currently silently drops order and duplicate keys) (zero new deps).
+
+## Phase 21: Skeptical-engineer review (code audit, 2026-08-08) — CONFIRMED BUGS
+
+> The following were reproduced empirically (scratch harness + `cargo` runs), not just read.
+> Each line is a distinct defect. Items already tracked elsewhere are NOT repeated here.
+
+### tpt-logfmt-parse (parser correctness)
+- [x] **Iterator never advances on `expected key` error → infinite loop on `for x in parser`.** `LogfmtParser::next` (`src/lib.rs:126-132`) returns `Err` without moving `pos` when the next token is `=value` or `"quoted"=1`, so every subsequent `next()` yields the identical error. Any caller that logs-and-continues hangs the process. Rename/relabel is insufficient — must consume the offending token.
+- [x] **`skip_whitespace` and token breaking ignore CRLF/tabs** (`src/lib.rs:58-62, 65-74, 169-172`). `"a=1\r\n"` parses `a` = `"1\r\n"`; `"a=1\tb=2"` errors at the tab. Real log lines and CRLF files are mishandled. (Tested: `parse_to_map("a=1\r\n")` → `{"a":"1\r\n"}`.)
+- [x] **`write_logfmt`/`format_pair` do NOT round-trip through the parsers** (cross-reference Phase 17 control-char item). `write_logfmt([("a b","x")])` → `"\"a b\"=x"`, which `parse_to_map` rejects (`expected key`) — the two halves of the crate are mutually incompatible. Also a value containing a raw `\n` is emitted as a literal newline, violating the "single logfmt line" contract.
+- [x] **Two public APIs disagree on identical input.** `LogfmtParser` (`src/lib.rs:84-114`) returns the *raw* slice including backslashes (`say \"hi\"`), while `parse_to_map` (`src/lib.rs:216-245`) decodes escapes (`say "hi"`). Same line, two different values — `LogfmtParser` is documented as zero-copy but is effectively useless for quoted values because of this. The escape-decoding logic is duplicated instead of shared, which is how they drifted.
+
+### tpt-cron-parse (parser correctness)
+- [x] **Trailing garbage after the last field is silently accepted.** `parse` (`src/lib.rs:415-457`) validates field *count* via `split_whitespace` but never checks for trailing bytes in the final field, so `"* * * * 1garbage"` and `"* * * * *DROP TABLE"` both `parse()` successfully. Anything past the 5th/6th field is ignored. Add a trailing-input check with a `CronError`.
+- [x] **`Step` over a `Range` ignores the range end.** `expand_field` (`src/lib.rs:276-296`) iterates `while v <= max` (the field max, 59/23/31/12/7) instead of `<= range_end`. `0 1-5/2 * * *` therefore fires at hours 1,3,5,7,9,…23 — not 1,3,5. `next_after`/`upcoming` inherit the wrong set. (Reproduced: `upcoming` over 12 iterations yields hours 1,3,5,7,9,11,13,15,17,19,21,23.)
+- [x] **6-field `next_after` skips the current minute entirely.** `src/lib.rs:177-218` starts `min_start = after_minute + 1min` and the `same_minute` branch (`:204`) can never be true, so `"30 0 9 * * *"` after `09:00:00` returns `next day 09:00:30` (test only checks h/m/s, masking this). `*/1 * * * * *` after `09:00:00` returns `09:01:00` instead of `09:00:01`.
+- [x] **Cron rejects tab-separated fields but `split_whitespace` (used for the count check) accepts them** (`src/lib.rs:419` vs `:326-330`). `"*\t*\t*\t*\t*"` is reported as 5 fields by the count check but fails parsing in the `hours` field — internally inconsistent and a spec mismatch (real crontabs use tabs).
+
+### tpt-geo-geojson (validation / spec)
+- [x] **Ring-closure test uses `f64::EPSILON`, not equality — both false-positives and false-negatives.** `parse_ring_array` (`src/lib.rs:591-592`) uses `> f64::EPSILON`. Because one ULP at `lon≈122` is ~1.4e-14 ≫ EPSILON, a ring off by one floating-point bit at large coordinates is wrongly *rejected*; near the origin, a ring off by 1e-17 is wrongly *accepted* as closed; and the altitude component is ignored entirely (a ring `[0,0,5]…[0,0,9]` passes). RFC 7946 requires exact closure; the fix is `first == last`. (Reproduced all three cases.)
+- [x] **`bbox` silently coerced, not validated.** `collect_extra` (`src/lib.rs:289-310`) uses `filter_map(Value::as_f64)` and *drops* non-numeric entries with no error, so `[0,0,"junk",10,10]` and `[null,null,null,null,1,2,3,4]` both parse and round-trip with the bad members gone, and there is **no longitude/latitude range check** on bbox (unlike positions). RFC 7946 bbox can also be out of range (`[-9999,-9999,9999,9999]` accepted). Malformed-but-even-length bbox (e.g. length 6) is also accepted.
+- [x] **No public `Deserialize` impls; `Geometry`/`Feature`/etc. cannot be `#[derive(Deserialize)]`d**, and **no `validate()` that re-checks a hand-constructed value** — `to_json` will happily emit *invalid* GeoJSON (NaN/Inf positions → `[null,null]`; 1-point "Polygon"; unclosed rings) because validation only runs during `parse`. Construction-time guarantees are absent.
+- [x] **`foreign_members` is a `HashMap`**, so `to_json` emits non-deterministic key order across runs/machines; the "round-trip" tests only pass because they re-`parse` into another non-deterministic map. Use `BTreeMap` if stable output is claimed.
+- [x] **Error `path` carries a leading stray `.`** (e.g. `.coordinates`, `.geometry.coordinates`) — `format!("{}.coordinates", "")` → `.coordinates`. Cosmetic but the docs promise "dot/bracket notation" starting at the root, not a leading dot.
+- [x] **Non-conformance / silent rewrites:** `properties` is conflated with `properties: null` (input without `properties` is rewritten to `properties: null`); `Feature` with `properties: 42` (non-object, non-null) is accepted; degenerate geometries (`LineString: []`, `Polygon: []`, `MultiPolygon: []`) are accepted. None match RFC 7946.
+
+### tpt-jsonl-stream (memory safety / perf)
+- [x] **Unbounded per-line buffering (DoS).** `JsonlReader::next` (`src/lib.rs:92-147`) calls `read_line` with no line-length cap and no `max` option. A single newline-free 100 GB line allocates 100 GB resident; for untrusted `.jsonl` this is a trivial OOM. Add a configurable max line length that yields an error instead of allocating.
+- [x] **`JsonlWriter::write` leaves corrupt partial output on serialize failure.** `src/lib.rs:208-219` writes the JSON *then* expects `write_all("\n")`; when `serde_json::to_writer` fails partway, the partial bytes remain in the sink and the next successful `write` appends after them, producing garbage lines (e.g. `{"ok":1}\n{{"ok":2}`). Buffer to a temp and emit atomically, or document the corruption contract.
+- [x] **`simd` feature is a pessimization, not a 3× speedup.** `src/lib.rs:110-132` does `trimmed.as_bytes().to_vec()` per line (fresh heap alloc + copy) before `simd_json::from_slice`, defeating SIMD's alloc-avoidance, and on any parse error it *re-parses the same line with serde_json*. Benchmark (50k realistic lines, this machine): default ≈ 145 MB/s, simd ≈ 100 MB/s — **slower**, contradicting the README/per-crate-doc "3× SIMD throughput" claim. Either fix the copy or stop advertising 3×.
+- [x] **`trim()` treats all Unicode whitespace (incl. NBSP) as blank lines**, diverging from the JSONL convention of "truly empty", and it also shifts `serde_json::Error` column offsets (no test asserts the original byte offset).
+
+### tpt-mime-pure (detection quality / false positives)
+- [x] **Several signatures are 2–4 bytes and produce frequent false positives on ordinary text.** `BM`→BMP, `MZ`→PE/exe, `00 00 01 00`→ICO, `CA FE BA BE`→JavaClass (also matches Mach-O fat binaries), `1F 8B`→Gzip. These are fine for *trusted* files but dangerous if used for upload/content-type decisions; the README sells "works wherever `file` isn't available" without any caveat. Document the false-positive risk or require longer/anchored signatures.
+- [x] **EBML DocType scan is brittle.** `detect` (`src/lib.rs:266-287`) masks the VINT size with `& 0x7F` (only single-byte sizes) and matches `42 82` *anywhere* in the first 512 bytes (can match inside other elements), and **silently defaults to `Mkv` instead of returning `None` when the DocType sits past the 512-byte window** — so a real WebM whose `webm` DocType is beyond offset 512 is reported as `Mkv`, and any other EBML subtype is also forced to `Mkv`. (Reproduced: WebM with DocType at offset ~604 → detected `Mkv`.)
+- [x] **`detect_file` reads only one `read()`** (`src/lib.rs:484-490`) — on pipes/filesystems that return short reads, `tar` (needs offset 257) and other offset signatures can miss. Use a loop/`read_to_end` like `tpt-cli` does.
+
+### tpt-cli (robustness / correctness)
+- [x] **`println!` panics on broken pipe.** Every subcommand prints with `println!`; piping to `head`/`less` that closes early causes `failed printing to stdout: Broken pipe` (RawMode/IO panic), a terrible CLI failure mode. Use `writeln!` to stdout with ignored errors (stderr already does this correctly).
+- [x] **`Mime` and `Geojson` read the ENTIRE file into memory** (`src/main.rs:75-79`, `:94-98`) even though `tpt-mime-pure` has a 8 KB `detect_file` and `tpt-geo-geojson` has `parse_reader`. A huge input OOMs the CLI; route through the streaming/limited APIs.
+- [x] **`Logfmt` subcommand prints raw unescaped slices** (`src/main.rs:103-108`) via `LogfmtParser`, so `"msg=\"say hi\""` prints `msg = say \"hi\"` (literal backslashes) — inconsistent with `parse_to_map` and unreadable. Use the decoding API.
+- [x] **`cron --next` is hardcoded to UTC with no timezone flag/no mention in help**, so non-UTC users get silently wrong "next run" times.
+
+### CI / release engineering (release.yml, ci.yml)
+- [x] **`publish.yml` does not depend on `ci.yml` and has no dry-run/`--allow-dirty` guard**, so a tag can be published even if tests failed on the same commit; re-tagging an already-published version errors mid-way and leaves later crates unpublished with no rollback.
+- [x] **CI only runs `--all-features`**, so the *default* (non-simd, non-chrono) code paths `cargo clippy`/`cargo test` never execute in CI. `cargo test --workspace` (default) and `cargo clippy --workspace` should also run.
+- [x] **`fuzz` job is `continue-on-error` AND only builds targets (never runs them)**, so the fuzz investment catches nothing in CI. Either run a short `cargo fuzz run` or drop the pretense.
+- [x] **`#![doc = include_str!("../README.md")]` is never built in CI** (`cargo doc --no-deps` dry-run absent, see Phase 18) — a broken doc include breaks the post-publish docs.rs build with no pre-check.
+- [x] **`no_std` claim is never compiled for a bare-metal target in CI.** It *does* build (`cargo build -p tpt-mime-pure --no-default-features --target thumbv7em-none-eabi` succeeds) but that's unverified in CI; add a `cargo build --no-default-features --target <none>` job or a `cargo build --no-default-features` doc/fuzz check.
+
+## Phase 21b: Corrections to earlier TODO entries (2026-08-08 audit)
+- [x] **Re-verify before acting — my prior correction below was wrong; the Phase 17 Zstandard bullet is CORRECT.** `tpt-mime-pure/src/lib.rs:330-333` uses `starts_with!([0x28, 0x4D, 0x18, 0x09])`. The canonical zstd frame magic (32-bit `0xFD2FB528`) is written little-endian on disk as bytes `28 B5 2F FD`, **not** `28 4D 18 09`. So real `.zst` files ARE misdetected → the original Phase 17 item stands and should be fixed (`28 B5 2F FD`). The byte claim in Phase 17 is accurate; do not strike it.

@@ -3,6 +3,16 @@
 
 use std::fmt;
 use std::io::{self, BufRead, Write};
+use std::marker::PhantomData;
+
+use serde::de::DeserializeOwned;
+
+/// The default maximum length, in bytes, of a single JSON Lines record.
+///
+/// A line longer than this (excluding its terminating newline) is reported as
+/// [`JsonlErrorKind::LineTooLong`] instead of being buffered. Override it with
+/// [`JsonlReader::with_max_line_length`].
+pub const DEFAULT_MAX_LINE_LENGTH: usize = 16 * 1024 * 1024;
 
 /// The kind of error that occurred while reading a JSON Lines stream.
 #[derive(Debug)]
@@ -11,6 +21,11 @@ pub enum JsonlErrorKind {
     Io(io::Error),
     /// A JSON parse error on a specific line.
     Json(serde_json::Error),
+    /// A line exceeded the reader's configured maximum line length.
+    LineTooLong {
+        /// The configured maximum line length, in bytes.
+        limit: usize,
+    },
 }
 
 impl fmt::Display for JsonlErrorKind {
@@ -18,6 +33,9 @@ impl fmt::Display for JsonlErrorKind {
         match self {
             Self::Io(e) => write!(f, "I/O error: {}", e),
             Self::Json(e) => write!(f, "JSON error: {}", e),
+            Self::LineTooLong { limit } => {
+                write!(f, "line exceeds the maximum length of {} bytes", limit)
+            }
         }
     }
 }
@@ -44,14 +62,49 @@ impl std::error::Error for JsonlError {
         match &self.kind {
             JsonlErrorKind::Io(e) => Some(e),
             JsonlErrorKind::Json(e) => Some(e),
+            JsonlErrorKind::LineTooLong { .. } => None,
         }
     }
 }
 
+enum LineOutcome {
+    Eof,
+    Line,
+    TooLong,
+    Io(io::Error),
+}
+
+fn trim_end_ascii_whitespace(bytes: &[u8]) -> usize {
+    let mut end = bytes.len();
+    while end > 0 && matches!(bytes[end - 1], b' ' | b'\t' | b'\r' | b'\n') {
+        end -= 1;
+    }
+    end
+}
+
+#[cfg(feature = "simd")]
+fn parse_line(bytes: &mut [u8]) -> Result<serde_json::Value, serde_json::Error> {
+    simd_json::from_slice(bytes).map_err(<serde_json::Error as serde::de::Error>::custom)
+}
+
+#[cfg(not(feature = "simd"))]
+fn parse_line(bytes: &mut [u8]) -> Result<serde_json::Value, serde_json::Error> {
+    serde_json::from_slice(bytes)
+}
+
 /// A streaming JSON Lines reader.
 ///
-/// Wraps any [`BufRead`] and yields one [`serde_json::Value`] per non-empty line.
-/// Blank lines are silently skipped. Parse errors carry the line number.
+/// Wraps any [`BufRead`] and yields one [`serde_json::Value`] per non-blank line.
+/// A line is blank only when it is empty or consists solely of ASCII whitespace
+/// (space, tab, carriage return, newline); lines made of other Unicode whitespace,
+/// such as a non-breaking space, are passed to the parser like any other content.
+/// Parse errors carry the line number, and their byte offsets refer to the original
+/// line because leading whitespace is never stripped before parsing.
+///
+/// Lines are buffered up to [`DEFAULT_MAX_LINE_LENGTH`] bytes by default. A longer
+/// line is skipped and reported as [`JsonlErrorKind::LineTooLong`] rather than
+/// buffered, so a newline-free stream cannot exhaust memory. See
+/// [`JsonlReader::with_max_line_length`].
 ///
 /// # Example
 ///
@@ -66,23 +119,131 @@ impl std::error::Error for JsonlError {
 /// ```
 pub struct JsonlReader<R: BufRead> {
     reader: R,
-    buf: String,
+    buf: Vec<u8>,
     line: u64,
+    max_line_length: usize,
 }
 
 impl<R: BufRead> JsonlReader<R> {
     /// Create a new `JsonlReader` wrapping the given buffered reader.
+    ///
+    /// The maximum line length defaults to [`DEFAULT_MAX_LINE_LENGTH`].
     pub fn new(reader: R) -> Self {
         Self {
             reader,
-            buf: String::new(),
+            buf: Vec::new(),
             line: 0,
+            max_line_length: DEFAULT_MAX_LINE_LENGTH,
         }
+    }
+
+    /// Set the maximum length, in bytes, of a single line (excluding its newline).
+    ///
+    /// A longer line is never buffered: the reader discards it, yields a
+    /// [`JsonlErrorKind::LineTooLong`] error carrying that line number, and resumes
+    /// at the next line. Pass [`usize::MAX`] for unbounded buffering.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use tpt_jsonl_stream::{JsonlErrorKind, JsonlReader};
+    /// use std::io::BufReader;
+    ///
+    /// let data = b"{\"a\":1}\n[0,1,2,3,4,5,6,7,8,9]\n{\"b\":2}\n";
+    /// let mut reader = JsonlReader::new(BufReader::new(data.as_slice())).with_max_line_length(8);
+    /// assert_eq!(reader.next().unwrap().unwrap()["a"], 1);
+    /// let err = reader.next().unwrap().unwrap_err();
+    /// assert!(matches!(err.kind, JsonlErrorKind::LineTooLong { limit: 8 }));
+    /// assert_eq!(reader.next().unwrap().unwrap()["b"], 2);
+    /// ```
+    pub fn with_max_line_length(mut self, max_line_length: usize) -> Self {
+        self.max_line_length = max_line_length;
+        self
+    }
+
+    /// The configured maximum line length, in bytes.
+    pub fn max_line_length(&self) -> usize {
+        self.max_line_length
     }
 
     /// The 1-based line number most recently read (or 0 before any reads).
     pub fn line_number(&self) -> u64 {
         self.line
+    }
+
+    /// Deserialize every yielded value into `T`.
+    ///
+    /// Returns an iterator of `Result<T, JsonlError>`: each line is parsed as JSON
+    /// and then deserialized, so both syntax errors and type mismatches carry the
+    /// 1-based line number.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use serde::Deserialize;
+    /// use std::io::BufReader;
+    /// use tpt_jsonl_stream::JsonlReader;
+    ///
+    /// #[derive(Deserialize)]
+    /// struct Row {
+    ///     id: u32,
+    /// }
+    ///
+    /// let data = b"{\"id\":1}\n{\"id\":2}\n";
+    /// let rows: Vec<Row> = JsonlReader::new(BufReader::new(data.as_slice()))
+    ///     .into_typed::<Row>()
+    ///     .collect::<Result<_, _>>()
+    ///     .unwrap();
+    /// assert_eq!(rows[1].id, 2);
+    /// ```
+    pub fn into_typed<T: DeserializeOwned>(self) -> TypedJsonlReader<R, T> {
+        TypedJsonlReader {
+            inner: self,
+            marker: PhantomData,
+        }
+    }
+
+    fn read_capped_line(&mut self) -> LineOutcome {
+        self.buf.clear();
+        let mut content_len: usize = 0;
+        let mut too_long = false;
+        let mut saw_bytes = false;
+        loop {
+            let chunk = match self.reader.fill_buf() {
+                Ok(chunk) => chunk,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return LineOutcome::Io(e),
+            };
+            if chunk.is_empty() {
+                break;
+            }
+            saw_bytes = true;
+            let (taken, terminated) = match chunk.iter().position(|&b| b == b'\n') {
+                Some(idx) => (idx + 1, true),
+                None => (chunk.len(), false),
+            };
+            if !too_long {
+                let payload = if terminated { taken - 1 } else { taken };
+                if content_len.saturating_add(payload) > self.max_line_length {
+                    too_long = true;
+                    self.buf = Vec::new();
+                } else {
+                    content_len += payload;
+                    self.buf.extend_from_slice(&chunk[..taken]);
+                }
+            }
+            self.reader.consume(taken);
+            if terminated {
+                break;
+            }
+        }
+        if too_long {
+            LineOutcome::TooLong
+        } else if saw_bytes {
+            LineOutcome::Line
+        } else {
+            LineOutcome::Eof
+        }
     }
 }
 
@@ -91,58 +252,228 @@ impl<R: BufRead> Iterator for JsonlReader<R> {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            self.buf.clear();
-            match self.reader.read_line(&mut self.buf) {
-                Err(e) => {
+            match self.read_capped_line() {
+                LineOutcome::Eof => return None,
+                LineOutcome::Io(e) => {
                     self.line += 1;
                     return Some(Err(JsonlError {
                         line: self.line,
                         kind: JsonlErrorKind::Io(e),
                     }));
                 }
-                Ok(0) => return None, // EOF
-                Ok(_) => {
+                LineOutcome::TooLong => {
                     self.line += 1;
-                    let trimmed = self.buf.trim();
-                    if trimmed.is_empty() {
-                        continue; // skip blank lines
+                    return Some(Err(JsonlError {
+                        line: self.line,
+                        kind: JsonlErrorKind::LineTooLong {
+                            limit: self.max_line_length,
+                        },
+                    }));
+                }
+                LineOutcome::Line => {
+                    self.line += 1;
+                    let end = trim_end_ascii_whitespace(&self.buf);
+                    if end == 0 {
+                        continue;
                     }
-                    #[cfg(feature = "simd")]
-                    {
-                        let mut bytes = trimmed.as_bytes().to_vec();
-                        match simd_json::from_slice(&mut bytes) {
-                            Ok(v) => return Some(Ok(v)),
-                            Err(_) => {
-                                // simd-json failed. Re-derive an error and value from
-                                // serde_json so we never panic on parser divergence:
-                                // if serde_json also rejects the line we surface its
-                                // precise error; if it accepts the line (divergence)
-                                // we yield the parsed value rather than crashing.
-                                match serde_json::from_str::<serde_json::Value>(trimmed) {
-                                    Ok(v) => return Some(Ok(v)),
-                                    Err(e) => {
-                                        return Some(Err(JsonlError {
-                                            line: self.line,
-                                            kind: JsonlErrorKind::Json(e),
-                                        }));
-                                    }
-                                }
-                            }
-                        }
+                    let line = self.line;
+                    return Some(parse_line(&mut self.buf[..end]).map_err(|e| JsonlError {
+                        line,
+                        kind: JsonlErrorKind::Json(e),
+                    }));
+                }
+            }
+        }
+    }
+}
+
+#[cfg(feature = "tokio")]
+pub use async_reader::AsyncJsonlReader;
+
+/// A streaming JSON Lines reader over `tokio`'s [`tokio::io::AsyncBufRead`].
+///
+/// Mirrors the synchronous [`JsonlReader`] but for asynchronous IO. Available
+/// with the optional `tokio` feature. The same line-length cap, blank-line
+/// handling, and `LineTooLong` protection apply.
+///
+/// ```rust,ignore
+/// use tpt_jsonl_stream::AsyncJsonlReader;
+/// use tokio::io::BufReader;
+///
+/// # async fn run() {
+/// let data = b"{\"a\":1}\n{\"b\":2}\n";
+/// let mut reader = AsyncJsonlReader::new(BufReader::new(data.as_slice()));
+/// while let Some(record) = reader.next().await {
+///     println!("{}", record.unwrap());
+/// }
+/// # }
+/// ```
+#[cfg(feature = "tokio")]
+mod async_reader {
+    use super::*;
+    use tokio::io::{AsyncBufRead, AsyncBufReadExt};
+
+    /// A streaming JSON Lines reader over an [`AsyncBufRead`].
+    ///
+    /// Created via [`AsyncJsonlReader::new`]. See the crate-level example for
+    /// usage.
+    pub struct AsyncJsonlReader<R: AsyncBufRead> {
+        reader: R,
+        buf: Vec<u8>,
+        line: u64,
+        max_line_length: usize,
+    }
+
+    impl<R: AsyncBufRead + Unpin> AsyncJsonlReader<R> {
+        /// Create a new `AsyncJsonlReader` wrapping the given async buffered reader.
+        ///
+        /// The maximum line length defaults to [`DEFAULT_MAX_LINE_LENGTH`].
+        pub fn new(reader: R) -> Self {
+            Self {
+                reader,
+                buf: Vec::new(),
+                line: 0,
+                max_line_length: DEFAULT_MAX_LINE_LENGTH,
+            }
+        }
+
+        /// Set the maximum length, in bytes, of a single line (excluding its newline).
+        ///
+        /// A longer line is never buffered: it is discarded, reported as
+        /// [`JsonlErrorKind::LineTooLong`], and the reader resumes at the next line.
+        /// Pass [`usize::MAX`] for unbounded buffering.
+        pub fn with_max_line_length(mut self, max_line_length: usize) -> Self {
+            self.max_line_length = max_line_length;
+            self
+        }
+
+        /// The configured maximum line length, in bytes.
+        pub fn max_line_length(&self) -> usize {
+            self.max_line_length
+        }
+
+        /// The 1-based line number most recently read (or 0 before any reads).
+        pub fn line_number(&self) -> u64 {
+            self.line
+        }
+
+        async fn read_capped_line(&mut self) -> LineOutcome {
+            self.buf.clear();
+            let mut content_len: usize = 0;
+            let mut too_long = false;
+            let mut saw_bytes = false;
+            loop {
+                let chunk = match self.reader.fill_buf().await {
+                    Ok(chunk) => chunk,
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(e) => return LineOutcome::Io(e),
+                };
+                if chunk.is_empty() {
+                    break;
+                }
+                saw_bytes = true;
+                let (taken, terminated) = match chunk.iter().position(|&b| b == b'\n') {
+                    Some(idx) => (idx + 1, true),
+                    None => (chunk.len(), false),
+                };
+                if !too_long {
+                    let payload = if terminated { taken - 1 } else { taken };
+                    if content_len.saturating_add(payload) > self.max_line_length {
+                        too_long = true;
+                        self.buf = Vec::new();
+                    } else {
+                        content_len += payload;
+                        self.buf.extend_from_slice(&chunk[..taken]);
                     }
-                    #[cfg(not(feature = "simd"))]
-                    match serde_json::from_str::<serde_json::Value>(trimmed) {
-                        Ok(v) => return Some(Ok(v)),
-                        Err(e) => {
-                            return Some(Err(JsonlError {
-                                line: self.line,
-                                kind: JsonlErrorKind::Json(e),
-                            }))
+                }
+                self.reader.consume(taken);
+                if terminated {
+                    break;
+                }
+            }
+            if too_long {
+                LineOutcome::TooLong
+            } else if saw_bytes {
+                LineOutcome::Line
+            } else {
+                LineOutcome::Eof
+            }
+        }
+
+        /// Async variant of [`JsonlReader::next`].
+        ///
+        /// Returns the next parsed record, or `None` when the stream ends.
+        pub async fn next(&mut self) -> Option<Result<serde_json::Value, JsonlError>> {
+            loop {
+                match self.read_capped_line().await {
+                    LineOutcome::Eof => return None,
+                    LineOutcome::Io(e) => {
+                        self.line += 1;
+                        return Some(Err(JsonlError {
+                            line: self.line,
+                            kind: JsonlErrorKind::Io(e),
+                        }));
+                    }
+                    LineOutcome::TooLong => {
+                        self.line += 1;
+                        return Some(Err(JsonlError {
+                            line: self.line,
+                            kind: JsonlErrorKind::LineTooLong {
+                                limit: self.max_line_length,
+                            },
+                        }));
+                    }
+                    LineOutcome::Line => {
+                        self.line += 1;
+                        let end = trim_end_ascii_whitespace(&self.buf);
+                        if end == 0 {
+                            continue;
                         }
+                        let line = self.line;
+                        return Some(parse_line(&mut self.buf[..end]).map_err(|e| JsonlError {
+                            line,
+                            kind: JsonlErrorKind::Json(e),
+                        }));
                     }
                 }
             }
         }
+    }
+}
+
+/// A streaming JSON Lines reader that deserializes each record into `T`.
+///
+/// Created by [`JsonlReader::into_typed`].
+pub struct TypedJsonlReader<R: BufRead, T> {
+    inner: JsonlReader<R>,
+    marker: PhantomData<fn() -> T>,
+}
+
+impl<R: BufRead, T> TypedJsonlReader<R, T> {
+    /// The 1-based line number most recently read (or 0 before any reads).
+    pub fn line_number(&self) -> u64 {
+        self.inner.line_number()
+    }
+
+    /// Consume this reader and return the underlying [`JsonlReader`].
+    pub fn into_inner(self) -> JsonlReader<R> {
+        self.inner
+    }
+}
+
+impl<R: BufRead, T: DeserializeOwned> Iterator for TypedJsonlReader<R, T> {
+    type Item = Result<T, JsonlError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let value = match self.inner.next()? {
+            Ok(value) => value,
+            Err(e) => return Some(Err(e)),
+        };
+        let line = self.inner.line_number();
+        Some(serde_json::from_value(value).map_err(|e| JsonlError {
+            line,
+            kind: JsonlErrorKind::Json(e),
+        }))
     }
 }
 
@@ -169,9 +500,10 @@ pub fn parse_jsonl<R: BufRead>(reader: R) -> JsonlReader<R> {
 /// A streaming JSON Lines writer.
 ///
 /// Wraps any [`Write`] and emits one JSON value per line. Each call to
-/// [`JsonlWriter::write`] serializes the value with `serde_json` and appends a
-/// trailing newline. Parse errors carry the 1-based line number of the write
-/// that failed.
+/// [`JsonlWriter::write`] serializes the value with `serde_json` into an internal
+/// buffer and only then emits the complete line, so a serialization failure leaves
+/// no partial record in the output. Errors carry the 1-based line number of the
+/// write that failed.
 ///
 /// # Example
 ///
@@ -191,12 +523,17 @@ pub fn parse_jsonl<R: BufRead>(reader: R) -> JsonlReader<R> {
 pub struct JsonlWriter<W: Write> {
     writer: W,
     line: u64,
+    scratch: Vec<u8>,
 }
 
 impl<W: Write> JsonlWriter<W> {
     /// Create a new `JsonlWriter` wrapping the given writer.
     pub fn new(writer: W) -> Self {
-        Self { writer, line: 0 }
+        Self {
+            writer,
+            line: 0,
+            scratch: Vec::new(),
+        }
     }
 
     /// The number of lines (values) written so far.
@@ -205,15 +542,23 @@ impl<W: Write> JsonlWriter<W> {
     }
 
     /// Serialize `value` as a single JSON Lines record (one line, newline-terminated).
+    ///
+    /// The record is serialized into an internal buffer first and written in a single
+    /// call, so a value that fails to serialize emits nothing at all and later writes
+    /// stay well-formed.
     pub fn write<T: serde::Serialize>(&mut self, value: &T) -> Result<(), JsonlError> {
-        serde_json::to_writer(&mut self.writer, value).map_err(|e| JsonlError {
+        self.scratch.clear();
+        serde_json::to_writer(&mut self.scratch, value).map_err(|e| JsonlError {
             line: self.line + 1,
             kind: JsonlErrorKind::Json(e),
         })?;
-        self.writer.write_all(b"\n").map_err(|e| JsonlError {
-            line: self.line + 1,
-            kind: JsonlErrorKind::Io(e),
-        })?;
+        self.scratch.push(b'\n');
+        self.writer
+            .write_all(&self.scratch)
+            .map_err(|e| JsonlError {
+                line: self.line + 1,
+                kind: JsonlErrorKind::Io(e),
+            })?;
         self.line += 1;
         Ok(())
     }
@@ -259,6 +604,23 @@ mod tests {
     use super::*;
     use std::io::BufReader;
 
+    #[derive(serde::Deserialize, Debug, PartialEq)]
+    struct Row {
+        id: u32,
+        name: String,
+    }
+
+    struct FailsMidway;
+
+    impl serde::Serialize for FailsMidway {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::SerializeMap;
+            let mut map = serializer.serialize_map(Some(2))?;
+            map.serialize_entry("partial", &1)?;
+            Err(serde::ser::Error::custom("serialization failed midway"))
+        }
+    }
+
     fn read_all(data: &[u8]) -> Vec<serde_json::Value> {
         parse_jsonl(BufReader::new(data))
             .collect::<Result<_, _>>()
@@ -290,12 +652,68 @@ mod tests {
     }
 
     #[test]
+    fn ascii_whitespace_lines_skipped() {
+        let vals = read_all(b"{\"a\":1}\n   \n\t\r\n{\"b\":2}\n");
+        assert_eq!(vals.len(), 2);
+    }
+
+    #[test]
+    fn crlf_lines_parse() {
+        let vals = read_all(b"{\"a\":1}\r\n{\"b\":2}\r\n");
+        assert_eq!(vals.len(), 2);
+        assert_eq!(vals[1]["b"], 2);
+    }
+
+    #[test]
+    fn nbsp_only_line_is_not_blank() {
+        let data = "{\"a\":1}\n\u{a0}\n{\"c\":3}\n";
+        let mut reader = parse_jsonl(BufReader::new(data.as_bytes()));
+        assert_eq!(reader.next().unwrap().unwrap()["a"], 1);
+        let err = reader.next().unwrap().unwrap_err();
+        assert_eq!(err.line, 2);
+        assert!(matches!(err.kind, JsonlErrorKind::Json(_)));
+        assert_eq!(reader.next().unwrap().unwrap()["c"], 3);
+        assert!(reader.next().is_none());
+    }
+
+    #[test]
     fn malformed_json_error_has_correct_line() {
         let data = b"{\"a\":1}\nNOT_JSON\n{\"c\":3}\n";
         let mut reader = parse_jsonl(BufReader::new(data.as_slice()));
         reader.next().unwrap().unwrap(); // line 1 ok
         let err = reader.next().unwrap().unwrap_err();
         assert_eq!(err.line, 2);
+    }
+
+    #[test]
+    fn error_line_number_counts_skipped_blank_lines() {
+        let data = b"{\"a\":1}\n\n   \nNOT_JSON\n{\"e\":5}\n";
+        let mut reader = parse_jsonl(BufReader::new(data.as_slice()));
+        reader.next().unwrap().unwrap();
+        let err = reader.next().unwrap().unwrap_err();
+        assert_eq!(err.line, 4);
+        assert_eq!(reader.line_number(), 4);
+        reader.next().unwrap().unwrap();
+        assert_eq!(reader.line_number(), 5);
+    }
+
+    #[cfg(not(feature = "simd"))]
+    #[test]
+    fn error_offsets_match_the_untrimmed_line() {
+        let line = "   {\"a\": }";
+        let direct = serde_json::from_str::<serde_json::Value>(line).unwrap_err();
+        let trimmed = serde_json::from_str::<serde_json::Value>(line.trim()).unwrap_err();
+        assert_ne!(direct.column(), trimmed.column());
+
+        let data = format!("{}\n", line);
+        let mut reader = parse_jsonl(BufReader::new(data.as_bytes()));
+        match reader.next().unwrap().unwrap_err().kind {
+            JsonlErrorKind::Json(e) => {
+                assert_eq!(e.line(), direct.line());
+                assert_eq!(e.column(), direct.column());
+            }
+            other => panic!("expected a JSON error, got {:?}", other),
+        }
     }
 
     #[test]
@@ -312,6 +730,87 @@ mod tests {
         let vals = read_all(b"{\"x\":42}");
         assert_eq!(vals.len(), 1);
         assert_eq!(vals[0]["x"], 42);
+    }
+
+    #[test]
+    fn default_max_line_length_is_exposed() {
+        let reader = parse_jsonl(BufReader::new(b"".as_slice()));
+        assert_eq!(reader.max_line_length(), DEFAULT_MAX_LINE_LENGTH);
+    }
+
+    #[test]
+    fn over_long_line_is_rejected_and_stream_resumes() {
+        let long = format!("{{\"a\":\"{}\"}}", "x".repeat(4096));
+        let data = format!("{{\"a\":1}}\n{}\n{{\"c\":3}}\n", long);
+        let mut reader = parse_jsonl(BufReader::new(data.as_bytes())).with_max_line_length(64);
+        assert_eq!(reader.next().unwrap().unwrap()["a"], 1);
+        let err = reader.next().unwrap().unwrap_err();
+        assert_eq!(err.line, 2);
+        assert!(matches!(
+            err.kind,
+            JsonlErrorKind::LineTooLong { limit: 64 }
+        ));
+        assert!(err.to_string().contains("64"));
+        assert_eq!(reader.next().unwrap().unwrap()["c"], 3);
+        assert!(reader.next().is_none());
+    }
+
+    #[test]
+    fn over_long_final_line_without_newline_is_rejected() {
+        let data = format!("[{}]", "1,".repeat(1000));
+        let mut reader = parse_jsonl(BufReader::new(data.as_bytes())).with_max_line_length(16);
+        let err = reader.next().unwrap().unwrap_err();
+        assert_eq!(err.line, 1);
+        assert!(matches!(err.kind, JsonlErrorKind::LineTooLong { .. }));
+        assert!(reader.next().is_none());
+    }
+
+    #[test]
+    fn line_of_exactly_the_limit_is_accepted() {
+        let data = b"[1,2,3]\n";
+        let vals: Vec<serde_json::Value> = parse_jsonl(BufReader::new(data.as_slice()))
+            .with_max_line_length(7)
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(vals, vec![serde_json::json!([1, 2, 3])]);
+    }
+
+    #[test]
+    fn typed_iterator_deserializes_records() {
+        let data = b"{\"id\":1,\"name\":\"a\"}\n\n{\"id\":2,\"name\":\"b\"}\n";
+        let rows: Vec<Row> = parse_jsonl(BufReader::new(data.as_slice()))
+            .into_typed::<Row>()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[1],
+            Row {
+                id: 2,
+                name: "b".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn typed_iterator_reports_line_for_type_mismatch() {
+        let data = b"{\"id\":1,\"name\":\"a\"}\n{\"id\":\"nope\",\"name\":\"b\"}\n";
+        let mut reader = parse_jsonl(BufReader::new(data.as_slice())).into_typed::<Row>();
+        reader.next().unwrap().unwrap();
+        let err = reader.next().unwrap().unwrap_err();
+        assert_eq!(err.line, 2);
+        assert_eq!(reader.line_number(), 2);
+        assert!(matches!(err.kind, JsonlErrorKind::Json(_)));
+    }
+
+    #[test]
+    fn typed_iterator_propagates_parse_errors() {
+        let data = b"NOT_JSON\n{\"id\":1,\"name\":\"a\"}\n";
+        let mut reader = parse_jsonl(BufReader::new(data.as_slice())).into_typed::<Row>();
+        let err = reader.next().unwrap().unwrap_err();
+        assert_eq!(err.line, 1);
+        let row = reader.next().unwrap().unwrap();
+        assert_eq!(row.id, 1);
     }
 
     #[test]
@@ -338,6 +837,29 @@ mod tests {
     }
 
     #[test]
+    fn failed_write_emits_nothing_and_leaves_output_valid() {
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut writer = JsonlWriter::new(&mut buf);
+            writer.write(&serde_json::json!({"a": 1})).unwrap();
+            let err = writer.write(&FailsMidway).unwrap_err();
+            assert_eq!(err.line, 2);
+            assert!(matches!(err.kind, JsonlErrorKind::Json(_)));
+            assert_eq!(writer.line_number(), 1);
+            writer.write(&serde_json::json!({"b": 2})).unwrap();
+            writer.flush().unwrap();
+        }
+        assert_eq!(
+            String::from_utf8(buf.clone()).unwrap(),
+            "{\"a\":1}\n{\"b\":2}\n"
+        );
+        let back: Vec<serde_json::Value> = parse_jsonl(BufReader::new(buf.as_slice()))
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(back.len(), 2);
+    }
+
+    #[test]
     fn write_jsonl_helper() {
         let mut buf: Vec<u8> = Vec::new();
         let values = [serde_json::json!(1), serde_json::json!(2)];
@@ -351,5 +873,18 @@ mod tests {
         let mut writer = JsonlWriter::new(&mut buf);
         writer.write(&serde_json::json!({"ok": true})).unwrap();
         assert_eq!(writer.line_number(), 1);
+    }
+
+    #[cfg(feature = "tokio")]
+    #[tokio::test]
+    async fn async_reader_yields_records() {
+        use tokio::io::BufReader;
+        let data = b"{\"a\":1}\n\n{\"b\":2}\n";
+        let mut reader = crate::AsyncJsonlReader::new(BufReader::new(data.as_slice()));
+        let first = reader.next().await.unwrap().unwrap();
+        assert_eq!(first["a"], 1);
+        let second = reader.next().await.unwrap().unwrap();
+        assert_eq!(second["b"], 2);
+        assert!(reader.next().await.is_none());
     }
 }

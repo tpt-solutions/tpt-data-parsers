@@ -10,8 +10,14 @@ AI and data-engineering pipelines use massive JSONL files. Standard parsers load
 ## Features
 
 - **Streaming** — reads one line at a time; constant memory regardless of file size
+- **Bounded memory** — a configurable max line length (16 MiB by default) means a
+  newline-free stream can never exhaust RAM
 - **Error context** — every error carries the exact 1-based line number
-- **Optional SIMD** — enable the `simd` feature for 3× JSON parse throughput on AVX2 CPUs
+- **Typed records** — `into_typed::<T>()` deserializes each line into your own struct
+- **Optional SIMD** — enable the `simd` feature to use `simd_json` for parsing; it
+  parses in place without an extra copy (benchmark on your own data before relying on it)
+- **Async streaming** — enable the `tokio` feature for an `AsyncJsonlReader` over
+  `tokio`'s `AsyncBufRead`
 - **Simple iterator API** — `for value in parse_jsonl(reader) { ... }`
 
 ## Usage
@@ -28,6 +34,51 @@ for result in parse_jsonl(BufReader::new(f)) {
 }
 ```
 
+### Typed records
+
+[`JsonlReader::into_typed`] deserializes every line into a type of your choice and
+still reports the line number for both syntax errors and type mismatches.
+
+```rust
+use serde::Deserialize;
+use std::io::BufReader;
+use tpt_jsonl_stream::parse_jsonl;
+
+#[derive(Deserialize)]
+struct User {
+    name: String,
+    age: u8,
+}
+
+let data = b"{\"name\":\"alice\",\"age\":30}\n{\"name\":\"bob\",\"age\":41}\n";
+let users: Vec<User> = parse_jsonl(BufReader::new(data.as_slice()))
+    .into_typed::<User>()
+    .collect::<Result<_, _>>()
+    .unwrap();
+assert_eq!(users[0].name, "alice");
+assert_eq!(users[1].age, 41);
+```
+
+### Line length limits
+
+Lines are buffered up to [`DEFAULT_MAX_LINE_LENGTH`] (16 MiB) by default. An
+over-long line is discarded rather than buffered, reported as
+[`JsonlErrorKind::LineTooLong`], and the stream resumes on the next line.
+
+```rust
+use std::io::BufReader;
+use tpt_jsonl_stream::{parse_jsonl, JsonlErrorKind};
+
+let data = b"{\"a\":1}\n[0,1,2,3,4,5,6,7,8,9]\n{\"b\":2}\n";
+let mut reader = parse_jsonl(BufReader::new(data.as_slice())).with_max_line_length(8);
+assert_eq!(reader.next().unwrap().unwrap()["a"], 1);
+let err = reader.next().unwrap().unwrap_err();
+assert!(matches!(err.kind, JsonlErrorKind::LineTooLong { limit: 8 }));
+assert_eq!(reader.next().unwrap().unwrap()["b"], 2);
+```
+
+Pass `usize::MAX` for unbounded buffering.
+
 ### SIMD acceleration
 
 ```toml
@@ -36,6 +87,15 @@ tpt-jsonl-stream = { version = "0.2", features = ["simd"] }
 ```
 
 Requires an AVX2-capable CPU. Falls back to standard parsing on unsupported hardware at compile time.
+Lines are parsed in place, with no per-line copy. With this feature enabled, a parse
+error carries `simd-json`'s message rather than `serde_json` line/column offsets.
+
+## Blank lines
+
+Only lines that are empty or consist solely of ASCII whitespace (space, tab, carriage
+return, newline) are skipped. Any other content — including a line holding just a
+non-breaking space — is handed to the parser, and error offsets refer to the original
+line because leading whitespace is never stripped.
 
 ## Error handling
 
@@ -56,7 +116,8 @@ for result in parse_jsonl(BufReader::new(data.as_slice())) {
 
 The crate is also a JSON Lines *writer*. [`JsonlWriter`] emits one
 newline-terminated JSON value per call; [`write_jsonl`] writes a whole
-sequence in one go.
+sequence in one go. Each record is serialized into an internal buffer and emitted
+as a single write, so a value that fails to serialize leaves no partial line behind.
 
 ```rust
 use tpt_jsonl_stream::JsonlWriter;

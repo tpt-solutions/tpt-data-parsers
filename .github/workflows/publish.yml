@@ -9,8 +9,41 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  verify:
+    name: Dry-run verification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: fmt check
+        run: cargo fmt --all -- --check
+
+      - name: clippy (all features)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: test (all features)
+        run: cargo test --all --all-features
+
+      - name: test tpt-mime-pure (no_std)
+        run: cargo test --no-default-features -p tpt-mime-pure
+
+      - name: Install cargo-semver-checks
+        run: cargo install cargo-semver-checks --locked
+
+      - name: semver checks
+        run: cargo semver-checks check-release --workspace
+
+      - name: publish dry-run (each crate)
+        run: |
+          for c in tpt-logfmt-parse tpt-cron-parse tpt-mime-pure tpt-jsonl-stream tpt-geo-geojson; do
+            cargo publish -p "$c" --dry-run --allow-dirty
+          done
+
   publish:
     name: Publish to crates.io
+    needs: verify
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

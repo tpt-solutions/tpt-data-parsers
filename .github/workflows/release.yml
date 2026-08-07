@@ -1,0 +1,71 @@
+name: Release binaries
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build tpt-cli release binary
+        run: cargo build -p tpt-cli --release --target ${{ matrix.target }}
+
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        run: |
+          BIN="tpt-cli-${{ matrix.target }}"
+          cp "target/${{ matrix.target }}/release/tpt-cli" "$BIN"
+          tar czf "$BIN.tar.gz" "$BIN"
+          rm "$BIN"
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        run: |
+          $bin = "tpt-cli-${{ matrix.target }}"
+          Copy-Item "target/${{ matrix.target }}/release/tpt-cli.exe" "$bin.exe"
+          Compress-Archive -Path "$bin.exe" -DestinationPath "$bin.zip"
+          Remove-Item "$bin.exe"
+
+      - name: Upload release asset (unix)
+        if: runner.os != 'Windows' && github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: tpt-cli-${{ matrix.target }}.tar.gz
+
+      - name: Upload release asset (windows)
+        if: runner.os == 'Windows' && github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: tpt-cli-${{ matrix.target }}.zip
+
+      - name: Upload build artifact
+        if: github.event_name != 'release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tpt-cli-${{ matrix.target }}
+          path: |
+            tpt-cli-${{ matrix.target }}.tar.gz
+            tpt-cli-${{ matrix.target }}.zip

@@ -4,7 +4,7 @@
 use serde::ser::SerializeMap;
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::io::Read;
 
@@ -141,6 +141,207 @@ pub enum Geometry {
     },
 }
 
+/// An axis-aligned bounding box computed from a geometry's own positions.
+///
+/// Longitude/latitude bounds are always present; altitude bounds are present only
+/// when at least one position carries a third coordinate.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct BoundingBox {
+    /// Minimum longitude.
+    pub west: f64,
+    /// Minimum latitude.
+    pub south: f64,
+    /// Maximum longitude.
+    pub east: f64,
+    /// Maximum latitude.
+    pub north: f64,
+    /// Minimum altitude, if any position has one.
+    pub min_altitude: Option<f64>,
+    /// Maximum altitude, if any position has one.
+    pub max_altitude: Option<f64>,
+}
+
+impl BoundingBox {
+    /// Convert to the RFC 7946 `bbox` array order.
+    ///
+    /// Returns `[west, south, east, north]`, or
+    /// `[west, south, min_altitude, east, north, max_altitude]` when altitude bounds
+    /// are present.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use tpt_geo_geojson::{parse, GeoJson};
+    ///
+    /// let geo = parse(r#"{"type":"LineString","coordinates":[[0,0],[2,3]]}"#).unwrap();
+    /// let GeoJson::Geometry(geom) = geo else { panic!("expected geometry") };
+    /// assert_eq!(geom.bounding_box().unwrap().to_vec(), vec![0.0, 0.0, 2.0, 3.0]);
+    /// ```
+    pub fn to_vec(&self) -> Vec<f64> {
+        match (self.min_altitude, self.max_altitude) {
+            (Some(min), Some(max)) => vec![self.west, self.south, min, self.east, self.north, max],
+            _ => vec![self.west, self.south, self.east, self.north],
+        }
+    }
+}
+
+impl Geometry {
+    /// Re-run the strict validation pass on a (possibly hand-constructed) geometry.
+    ///
+    /// This runs exactly the same checks [`parse`] applies: positions must have 2 or 3
+    /// finite coordinates within longitude ∈ [-180, 180] and latitude ∈ [-90, 90], and
+    /// polygon rings must have at least 4 positions and be exactly closed.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use tpt_geo_geojson::{Geometry, Position};
+    ///
+    /// let ok = Geometry::Point {
+    ///     coordinates: Position::new(vec![1.0, 2.0]).unwrap(),
+    /// };
+    /// assert!(ok.validate().is_ok());
+    /// ```
+    pub fn validate(&self) -> Result<(), GeoError> {
+        validate_geometry_at(self, "")
+    }
+
+    /// Compute the bounding box of this geometry from its own positions.
+    ///
+    /// Returns `None` when the geometry contains no positions at all (for example an
+    /// empty `MultiPoint` or an empty `GeometryCollection`).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use tpt_geo_geojson::{parse, GeoJson};
+    ///
+    /// let geo = parse(r#"{"type":"MultiPoint","coordinates":[[0,0],[4,5]]}"#).unwrap();
+    /// let GeoJson::Geometry(geom) = geo else { panic!("expected geometry") };
+    /// let bbox = geom.bounding_box().unwrap();
+    /// assert_eq!((bbox.west, bbox.south, bbox.east, bbox.north), (0.0, 0.0, 4.0, 5.0));
+    /// ```
+    pub fn bounding_box(&self) -> Option<BoundingBox> {
+        let mut west = f64::INFINITY;
+        let mut south = f64::INFINITY;
+        let mut east = f64::NEG_INFINITY;
+        let mut north = f64::NEG_INFINITY;
+        let mut min_altitude: Option<f64> = None;
+        let mut max_altitude: Option<f64> = None;
+        let mut seen = false;
+        self.for_each_position(&mut |p| {
+            seen = true;
+            west = west.min(p.longitude());
+            east = east.max(p.longitude());
+            south = south.min(p.latitude());
+            north = north.max(p.latitude());
+            if let Some(alt) = p.altitude() {
+                min_altitude = Some(min_altitude.map_or(alt, |m: f64| m.min(alt)));
+                max_altitude = Some(max_altitude.map_or(alt, |m: f64| m.max(alt)));
+            }
+        });
+        if !seen {
+            return None;
+        }
+        Some(BoundingBox {
+            west,
+            south,
+            east,
+            north,
+            min_altitude,
+            max_altitude,
+        })
+    }
+
+    /// Test whether `point` lies inside this geometry.
+    ///
+    /// Implemented for `Polygon` and `MultiPolygon` using an even-odd ray-casting test.
+    /// Holes are honoured: a point inside the exterior ring but inside any interior ring
+    /// is not contained. Points exactly on an edge or vertex may be reported either way,
+    /// as is usual for floating-point ray casting. Every other geometry type returns
+    /// `false`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use tpt_geo_geojson::{parse, GeoJson, Position};
+    ///
+    /// let geo = parse(r#"{"type":"Polygon","coordinates":[[[0,0],[4,0],[4,4],[0,4],[0,0]]]}"#).unwrap();
+    /// let GeoJson::Geometry(geom) = geo else { panic!("expected geometry") };
+    /// assert!(geom.contains(&Position::new(vec![2.0, 2.0]).unwrap()));
+    /// assert!(!geom.contains(&Position::new(vec![9.0, 9.0]).unwrap()));
+    /// ```
+    pub fn contains(&self, point: &Position) -> bool {
+        match self {
+            Self::Polygon { coordinates } => polygon_contains(coordinates, point),
+            Self::MultiPolygon { coordinates } => coordinates
+                .iter()
+                .any(|polygon| polygon_contains(polygon, point)),
+            _ => false,
+        }
+    }
+
+    fn for_each_position(&self, f: &mut impl FnMut(&Position)) {
+        match self {
+            Self::Point { coordinates } => f(coordinates),
+            Self::MultiPoint { coordinates } | Self::LineString { coordinates } => {
+                for p in coordinates {
+                    f(p);
+                }
+            }
+            Self::MultiLineString { coordinates } | Self::Polygon { coordinates } => {
+                for line in coordinates {
+                    for p in line {
+                        f(p);
+                    }
+                }
+            }
+            Self::MultiPolygon { coordinates } => {
+                for polygon in coordinates {
+                    for ring in polygon {
+                        for p in ring {
+                            f(p);
+                        }
+                    }
+                }
+            }
+            Self::GeometryCollection { geometries } => {
+                for geometry in geometries {
+                    geometry.for_each_position(f);
+                }
+            }
+        }
+    }
+}
+
+fn polygon_contains(rings: &[Vec<Position>], point: &Position) -> bool {
+    let Some(exterior) = rings.first() else {
+        return false;
+    };
+    if !ring_contains(exterior, point) {
+        return false;
+    }
+    !rings[1..].iter().any(|hole| ring_contains(hole, point))
+}
+
+fn ring_contains(ring: &[Position], point: &Position) -> bool {
+    if ring.len() < 3 {
+        return false;
+    }
+    let (x, y) = (point.longitude(), point.latitude());
+    let mut inside = false;
+    let mut j = ring.len() - 1;
+    for i in 0..ring.len() {
+        let (xi, yi) = (ring[i].longitude(), ring[i].latitude());
+        let (xj, yj) = (ring[j].longitude(), ring[j].latitude());
+        if (yi > y) != (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
+}
+
 // ---- Feature types ----
 
 /// A GeoJSON Feature.
@@ -155,7 +356,18 @@ pub struct Feature {
     /// An optional bounding box `[west, south, east, north]` (plus optional altitude pairs).
     pub bbox: Option<Vec<f64>>,
     /// Non-standard members present on the feature, preserved across a serialize/parse round-trip.
-    pub foreign_members: HashMap<String, Value>,
+    ///
+    /// Ordered by key so serialization is deterministic.
+    pub foreign_members: BTreeMap<String, Value>,
+}
+
+impl Feature {
+    /// Re-run the strict validation pass on a (possibly hand-constructed) feature.
+    ///
+    /// Validates the `bbox`, if any, and the geometry with [`Geometry::validate`].
+    pub fn validate(&self) -> Result<(), GeoError> {
+        validate_feature_at(self, "")
+    }
 }
 
 impl Serialize for Feature {
@@ -185,7 +397,18 @@ pub struct FeatureCollection {
     /// An optional bounding box `[west, south, east, north]` (plus optional altitude pairs).
     pub bbox: Option<Vec<f64>>,
     /// Non-standard members present on the collection, preserved across a serialize/parse round-trip.
-    pub foreign_members: HashMap<String, Value>,
+    ///
+    /// Ordered by key so serialization is deterministic.
+    pub foreign_members: BTreeMap<String, Value>,
+}
+
+impl FeatureCollection {
+    /// Re-run the strict validation pass on a (possibly hand-constructed) collection.
+    ///
+    /// Validates the collection `bbox`, if any, and every contained feature.
+    pub fn validate(&self) -> Result<(), GeoError> {
+        validate_feature_collection_at(self, "")
+    }
 }
 
 impl Serialize for FeatureCollection {
@@ -193,6 +416,55 @@ impl Serialize for FeatureCollection {
         let mut state = serializer.serialize_map(None)?;
         state.serialize_entry("type", "FeatureCollection")?;
         state.serialize_entry("features", &self.features)?;
+        if let Some(bbox) = &self.bbox {
+            state.serialize_entry("bbox", bbox)?;
+        }
+        for (k, v) in &self.foreign_members {
+            state.serialize_entry(k, v)?;
+        }
+        state.end()
+    }
+}
+
+/// A bare top-level Geometry that also carries a `bbox` and/or foreign members.
+///
+/// [`parse`] produces [`GeoJson::Geometry`] for a plain geometry object and this type
+/// only when the object has a `bbox` or non-standard members, so both survive a
+/// parse → serialize → parse round-trip.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GeometryObject {
+    /// The geometry itself.
+    pub geometry: Geometry,
+    /// An optional bounding box `[west, south, east, north]` (plus optional altitude pairs).
+    pub bbox: Option<Vec<f64>>,
+    /// Non-standard members present on the geometry object, preserved across a
+    /// serialize/parse round-trip.
+    ///
+    /// Ordered by key so serialization is deterministic.
+    pub foreign_members: BTreeMap<String, Value>,
+}
+
+impl GeometryObject {
+    /// Re-run the strict validation pass on a (possibly hand-constructed) geometry object.
+    ///
+    /// Validates the `bbox`, if any, and the geometry with [`Geometry::validate`].
+    pub fn validate(&self) -> Result<(), GeoError> {
+        validate_geometry_object_at(self, "")
+    }
+}
+
+impl Serialize for GeometryObject {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let value = serde_json::to_value(&self.geometry).map_err(serde::ser::Error::custom)?;
+        let Value::Object(members) = value else {
+            return Err(serde::ser::Error::custom(
+                "geometry must serialize to an object",
+            ));
+        };
+        let mut state = serializer.serialize_map(None)?;
+        for (k, v) in &members {
+            state.serialize_entry(k, v)?;
+        }
         if let Some(bbox) = &self.bbox {
             state.serialize_entry("bbox", bbox)?;
         }
@@ -212,6 +484,40 @@ pub enum GeoJson {
     FeatureCollection(FeatureCollection),
     /// A bare Geometry.
     Geometry(Geometry),
+    /// A bare Geometry carrying a `bbox` and/or foreign members.
+    GeometryObject(GeometryObject),
+}
+
+impl GeoJson {
+    /// Re-run the strict validation pass on a (possibly hand-constructed) value.
+    ///
+    /// [`parse`] already validates, so this is only needed for values you build or
+    /// mutate yourself. It applies exactly the same checks: positions must have 2 or 3
+    /// finite coordinates within longitude ∈ [-180, 180] and latitude ∈ [-90, 90],
+    /// polygon rings must have at least 4 positions and be exactly closed, and any
+    /// `bbox` must be a 4- or 6-element array of finite, in-range numbers.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use tpt_geo_geojson::{GeoJson, Geometry, Position};
+    ///
+    /// let geo = GeoJson::Geometry(Geometry::LineString {
+    ///     coordinates: vec![
+    ///         Position::new(vec![0.0, 0.0]).unwrap(),
+    ///         Position::new(vec![1.0, 1.0]).unwrap(),
+    ///     ],
+    /// });
+    /// assert!(geo.validate().is_ok());
+    /// ```
+    pub fn validate(&self) -> Result<(), GeoError> {
+        match self {
+            Self::Feature(f) => validate_feature_at(f, ""),
+            Self::FeatureCollection(fc) => validate_feature_collection_at(fc, ""),
+            Self::Geometry(g) => validate_geometry_at(g, ""),
+            Self::GeometryObject(g) => validate_geometry_object_at(g, ""),
+        }
+    }
 }
 
 impl Serialize for GeoJson {
@@ -220,6 +526,7 @@ impl Serialize for GeoJson {
             Self::Feature(f) => f.serialize(serializer),
             Self::FeatureCollection(fc) => fc.serialize(serializer),
             Self::Geometry(g) => g.serialize(serializer),
+            Self::GeometryObject(g) => g.serialize(serializer),
         }
     }
 }
@@ -280,31 +587,44 @@ pub fn to_json(value: &GeoJson) -> Result<String, GeoError> {
 
 // ---- Internal parsing ----
 
+fn child(path: &str, member: &str) -> String {
+    if path.is_empty() {
+        member.to_owned()
+    } else {
+        format!("{}.{}", path, member)
+    }
+}
+
+fn index(path: &str, i: usize) -> String {
+    format!("{}[{}]", path, i)
+}
+
 /// Extract the optional `bbox` array and any non-standard members from `v`,
 /// excluding the `known` field names. Used to preserve `bbox` and foreign
 /// members across a parse/serialize round-trip.
-type CollectedExtra = (Option<Vec<f64>>, HashMap<String, Value>);
+type CollectedExtra = (Option<Vec<f64>>, BTreeMap<String, Value>);
 
 fn collect_extra(v: &Value, known: &[&str], path: &str) -> Result<CollectedExtra, GeoError> {
+    let bbox_path = child(path, "bbox");
     let bbox = match v.get("bbox") {
         None => None,
         Some(b) => {
             let arr = b.as_array().ok_or_else(|| GeoError {
                 kind: GeoErrorKind::MalformedCoordinates("bbox must be an array".into()),
-                path: format!("{}.bbox", path),
+                path: bbox_path.clone(),
             })?;
-            let vals: Vec<f64> = arr.iter().filter_map(Value::as_f64).collect();
-            // RFC 7946: a bbox is [west, south, east, north] (+ optional altitude
-            // pairs), so it must have an even length of at least 4.
-            if vals.len() < 4 || vals.len() % 2 != 0 {
-                return Err(GeoError {
+            let mut vals = Vec::with_capacity(arr.len());
+            for (i, item) in arr.iter().enumerate() {
+                let n = item.as_f64().ok_or_else(|| GeoError {
                     kind: GeoErrorKind::MalformedCoordinates(format!(
-                        "bbox must have an even length >= 4, got {}",
-                        vals.len()
+                        "bbox element {} must be a number, got {}",
+                        i, item
                     )),
-                    path: format!("{}.bbox", path),
-                });
+                    path: bbox_path.clone(),
+                })?;
+                vals.push(n);
             }
+            validate_bbox_values(&vals, &bbox_path)?;
             Some(vals)
         }
     };
@@ -314,7 +634,7 @@ fn collect_extra(v: &Value, known: &[&str], path: &str) -> Result<CollectedExtra
             obj.iter()
                 .filter(|(k, _)| !known.contains(&k.as_str()))
                 .map(|(k, val)| (k.clone(), val.clone()))
-                .collect::<HashMap<String, Value>>()
+                .collect::<BTreeMap<String, Value>>()
         })
         .unwrap_or_default();
     Ok((bbox, foreign))
@@ -326,7 +646,7 @@ fn parse_value(v: &Value, path: &str) -> Result<GeoJson, GeoError> {
         .and_then(Value::as_str)
         .ok_or_else(|| GeoError {
             kind: GeoErrorKind::InvalidType("missing or non-string 'type' field".into()),
-            path: format!("{}.type", path),
+            path: child(path, "type"),
         })?;
 
     match type_str {
@@ -338,17 +658,12 @@ fn parse_value(v: &Value, path: &str) -> Result<GeoJson, GeoError> {
                         kind: GeoErrorKind::InvalidType(
                             "FeatureCollection missing 'features' array".into(),
                         ),
-                        path: format!("{}.features", path),
+                        path: child(path, "features"),
                     })?;
+            let features_path = child(path, "features");
             let mut features = Vec::with_capacity(features_val.len());
             for (i, fv) in features_val.iter().enumerate() {
-                let prefix = if path.is_empty() {
-                    String::new()
-                } else {
-                    format!("{}.", path)
-                };
-                let fp = format!("{}features[{}]", prefix, i);
-                features.push(parse_feature(fv, &fp)?);
+                features.push(parse_feature(fv, &index(&features_path, i))?);
             }
             let (bbox, foreign_members) = collect_extra(v, &["type", "features", "bbox"], path)?;
             Ok(GeoJson::FeatureCollection(FeatureCollection {
@@ -357,17 +672,23 @@ fn parse_value(v: &Value, path: &str) -> Result<GeoJson, GeoError> {
                 foreign_members,
             }))
         }
-        "Feature" => {
-            let fp = if path.is_empty() {
-                String::new()
-            } else {
-                path.to_owned()
-            };
-            Ok(GeoJson::Feature(parse_feature(v, &fp)?))
-        }
+        "Feature" => Ok(GeoJson::Feature(parse_feature(v, path)?)),
         _ => {
-            let geom = parse_geometry(v, path)?;
-            Ok(GeoJson::Geometry(geom))
+            let geometry = parse_geometry(v, path)?;
+            let known: &[&str] = match geometry {
+                Geometry::GeometryCollection { .. } => &["type", "geometries", "bbox"],
+                _ => &["type", "coordinates", "bbox"],
+            };
+            let (bbox, foreign_members) = collect_extra(v, known, path)?;
+            if bbox.is_none() && foreign_members.is_empty() {
+                Ok(GeoJson::Geometry(geometry))
+            } else {
+                Ok(GeoJson::GeometryObject(GeometryObject {
+                    geometry,
+                    bbox,
+                    foreign_members,
+                }))
+            }
         }
     }
 }
@@ -376,16 +697,13 @@ fn parse_feature(v: &Value, path: &str) -> Result<Feature, GeoError> {
     if v.get("type").and_then(Value::as_str) != Some("Feature") {
         return Err(GeoError {
             kind: GeoErrorKind::InvalidType(format!("expected 'Feature', got {:?}", v.get("type"))),
-            path: format!("{}.type", path),
+            path: child(path, "type"),
         });
     }
 
     let geometry = match v.get("geometry") {
         None | Some(Value::Null) => None,
-        Some(geom_val) => {
-            let gp = format!("{}.geometry", path);
-            Some(parse_geometry(geom_val, &gp)?)
-        }
+        Some(geom_val) => Some(parse_geometry(geom_val, &child(path, "geometry"))?),
     };
 
     let properties = v.get("properties").cloned();
@@ -408,18 +726,17 @@ fn parse_geometry(v: &Value, path: &str) -> Result<Geometry, GeoError> {
         .and_then(Value::as_str)
         .ok_or_else(|| GeoError {
             kind: GeoErrorKind::InvalidType("geometry missing 'type' field".into()),
-            path: format!("{}.type", path),
+            path: child(path, "type"),
         })?;
 
+    let coords_path = child(path, "coordinates");
     match type_str {
         "Point" => {
-            let coords_path = format!("{}.coordinates", path);
             let raw = coords_raw(v, &coords_path)?;
             let pos = parse_position(raw, &coords_path)?;
             Ok(Geometry::Point { coordinates: pos })
         }
         "MultiPoint" => {
-            let coords_path = format!("{}.coordinates", path);
             let arr = coords_raw(v, &coords_path)?;
             let positions = parse_position_array(arr, &coords_path)?;
             Ok(Geometry::MultiPoint {
@@ -427,7 +744,6 @@ fn parse_geometry(v: &Value, path: &str) -> Result<Geometry, GeoError> {
             })
         }
         "LineString" => {
-            let coords_path = format!("{}.coordinates", path);
             let arr = coords_raw(v, &coords_path)?;
             let positions = parse_position_array(arr, &coords_path)?;
             Ok(Geometry::LineString {
@@ -435,7 +751,6 @@ fn parse_geometry(v: &Value, path: &str) -> Result<Geometry, GeoError> {
             })
         }
         "MultiLineString" => {
-            let coords_path = format!("{}.coordinates", path);
             let arr = coords_raw(v, &coords_path)?
                 .as_array()
                 .ok_or_else(|| GeoError {
@@ -446,18 +761,15 @@ fn parse_geometry(v: &Value, path: &str) -> Result<Geometry, GeoError> {
                 })?;
             let mut lines = Vec::with_capacity(arr.len());
             for (i, line_val) in arr.iter().enumerate() {
-                let lp = format!("{}[{}]", coords_path, i);
-                lines.push(parse_position_array(line_val, &lp)?);
+                lines.push(parse_position_array(line_val, &index(&coords_path, i))?);
             }
             Ok(Geometry::MultiLineString { coordinates: lines })
         }
         "Polygon" => {
-            let coords_path = format!("{}.coordinates", path);
             let rings = parse_rings(v, &coords_path)?;
             Ok(Geometry::Polygon { coordinates: rings })
         }
         "MultiPolygon" => {
-            let coords_path = format!("{}.coordinates", path);
             let arr = coords_raw(v, &coords_path)?
                 .as_array()
                 .ok_or_else(|| GeoError {
@@ -466,9 +778,7 @@ fn parse_geometry(v: &Value, path: &str) -> Result<Geometry, GeoError> {
                 })?;
             let mut polys = Vec::with_capacity(arr.len());
             for (i, poly_val) in arr.iter().enumerate() {
-                let pp = format!("{}[{}]", coords_path, i);
-                let rings = parse_rings_value(poly_val, &pp)?;
-                polys.push(rings);
+                polys.push(parse_rings_value(poly_val, &index(&coords_path, i))?);
             }
             Ok(Geometry::MultiPolygon { coordinates: polys })
         }
@@ -480,18 +790,18 @@ fn parse_geometry(v: &Value, path: &str) -> Result<Geometry, GeoError> {
                     kind: GeoErrorKind::InvalidType(
                         "GeometryCollection missing 'geometries' array".into(),
                     ),
-                    path: format!("{}.geometries", path),
+                    path: child(path, "geometries"),
                 })?;
+            let geoms_path = child(path, "geometries");
             let mut geoms = Vec::with_capacity(geoms_val.len());
             for (i, gv) in geoms_val.iter().enumerate() {
-                let gp = format!("{}.geometries[{}]", path, i);
-                geoms.push(parse_geometry(gv, &gp)?);
+                geoms.push(parse_geometry(gv, &index(&geoms_path, i))?);
             }
             Ok(Geometry::GeometryCollection { geometries: geoms })
         }
         other => Err(GeoError {
             kind: GeoErrorKind::InvalidType(format!("unknown geometry type '{}'", other)),
-            path: format!("{}.type", path),
+            path: child(path, "type"),
         }),
     }
 }
@@ -508,15 +818,6 @@ fn parse_position(v: &Value, path: &str) -> Result<Position, GeoError> {
         kind: GeoErrorKind::MalformedCoordinates("position must be an array".into()),
         path: path.to_owned(),
     })?;
-    if arr.len() < 2 || arr.len() > 3 {
-        return Err(GeoError {
-            kind: GeoErrorKind::MalformedCoordinates(format!(
-                "position must have 2 or 3 elements, got {}",
-                arr.len()
-            )),
-            path: path.to_owned(),
-        });
-    }
     let coords: Vec<f64> = arr
         .iter()
         .map(|n| {
@@ -526,18 +827,11 @@ fn parse_position(v: &Value, path: &str) -> Result<Position, GeoError> {
             })
         })
         .collect::<Result<Vec<f64>, _>>()?;
-    // RFC 7946 §3.1.1: longitude ∈ [-180, 180], latitude ∈ [-90, 90].
-    let (lon, lat) = (coords[0], coords[1]);
-    if !(-180.0..=180.0).contains(&lon) || !(-90.0..=90.0).contains(&lat) {
-        return Err(GeoError {
-            kind: GeoErrorKind::MalformedCoordinates(format!(
-                "coordinate out of range: longitude {}, latitude {} (must be lon ∈ [-180,180], lat ∈ [-90,90])",
-                lon, lat
-            )),
-            path: path.to_owned(),
-        });
-    }
-    Position::new(coords)
+    validate_coords(&coords, path)?;
+    Position::new(coords).map_err(|e| GeoError {
+        kind: e.kind,
+        path: path.to_owned(),
+    })
 }
 
 fn parse_position_array(v: &Value, path: &str) -> Result<Vec<Position>, GeoError> {
@@ -547,8 +841,7 @@ fn parse_position_array(v: &Value, path: &str) -> Result<Vec<Position>, GeoError
     })?;
     let mut positions = Vec::with_capacity(arr.len());
     for (i, pv) in arr.iter().enumerate() {
-        let pp = format!("{}[{}]", path, i);
-        positions.push(parse_position(pv, &pp)?);
+        positions.push(parse_position(pv, &index(path, i))?);
     }
     Ok(positions)
 }
@@ -574,33 +867,186 @@ fn parse_rings_value(v: &Value, path: &str) -> Result<Vec<Vec<Position>>, GeoErr
 fn parse_ring_array(arr: &[Value], path: &str) -> Result<Vec<Vec<Position>>, GeoError> {
     let mut rings = Vec::with_capacity(arr.len());
     for (i, ring_val) in arr.iter().enumerate() {
-        let rp = format!("{}[{}]", path, i);
+        let rp = index(path, i);
         let positions = parse_position_array(ring_val, &rp)?;
-        // RFC 7946: ring must have ≥ 4 positions and be closed
-        if positions.len() < 4 {
-            return Err(GeoError {
-                kind: GeoErrorKind::InvalidRing(format!(
-                    "ring must have at least 4 positions, got {}",
-                    positions.len()
-                )),
-                path: rp,
-            });
-        }
-        let first = &positions[0];
-        let last = &positions[positions.len() - 1];
-        if (first.longitude() - last.longitude()).abs() > f64::EPSILON
-            || (first.latitude() - last.latitude()).abs() > f64::EPSILON
-        {
-            return Err(GeoError {
-                kind: GeoErrorKind::InvalidRing(
-                    "polygon ring is not closed (first position != last position)".into(),
-                ),
-                path: rp,
-            });
-        }
+        validate_ring(&positions, &rp)?;
         rings.push(positions);
     }
     Ok(rings)
+}
+
+// ---- Internal validation ----
+
+fn validate_coords(coords: &[f64], path: &str) -> Result<(), GeoError> {
+    if coords.len() < 2 || coords.len() > 3 {
+        return Err(GeoError {
+            kind: GeoErrorKind::MalformedCoordinates(format!(
+                "position must have 2 or 3 elements, got {}",
+                coords.len()
+            )),
+            path: path.to_owned(),
+        });
+    }
+    for (i, c) in coords.iter().enumerate() {
+        if !c.is_finite() {
+            return Err(GeoError {
+                kind: GeoErrorKind::MalformedCoordinates(format!(
+                    "coordinate {} must be a finite number, got {}",
+                    i, c
+                )),
+                path: path.to_owned(),
+            });
+        }
+    }
+    let (lon, lat) = (coords[0], coords[1]);
+    if !(-180.0..=180.0).contains(&lon) || !(-90.0..=90.0).contains(&lat) {
+        return Err(GeoError {
+            kind: GeoErrorKind::MalformedCoordinates(format!(
+                "coordinate out of range: longitude {}, latitude {} (must be lon ∈ [-180,180], lat ∈ [-90,90])",
+                lon, lat
+            )),
+            path: path.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_position(p: &Position, path: &str) -> Result<(), GeoError> {
+    validate_coords(&p.0, path)
+}
+
+fn validate_ring(ring: &[Position], path: &str) -> Result<(), GeoError> {
+    for (i, p) in ring.iter().enumerate() {
+        validate_position(p, &index(path, i))?;
+    }
+    if ring.len() < 4 {
+        return Err(GeoError {
+            kind: GeoErrorKind::InvalidRing(format!(
+                "ring must have at least 4 positions, got {}",
+                ring.len()
+            )),
+            path: path.to_owned(),
+        });
+    }
+    if ring[0] != ring[ring.len() - 1] {
+        return Err(GeoError {
+            kind: GeoErrorKind::InvalidRing(
+                "polygon ring is not closed (first position != last position)".into(),
+            ),
+            path: path.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_bbox_values(vals: &[f64], path: &str) -> Result<(), GeoError> {
+    if vals.len() != 4 && vals.len() != 6 {
+        return Err(GeoError {
+            kind: GeoErrorKind::MalformedCoordinates(format!(
+                "bbox must have 4 (2D) or 6 (3D) elements, got {}",
+                vals.len()
+            )),
+            path: path.to_owned(),
+        });
+    }
+    for (i, n) in vals.iter().enumerate() {
+        if !n.is_finite() {
+            return Err(GeoError {
+                kind: GeoErrorKind::MalformedCoordinates(format!(
+                    "bbox element {} must be a finite number, got {}",
+                    i, n
+                )),
+                path: path.to_owned(),
+            });
+        }
+    }
+    let half = vals.len() / 2;
+    for corner in [0usize, half] {
+        let (lon, lat) = (vals[corner], vals[corner + 1]);
+        if !(-180.0..=180.0).contains(&lon) || !(-90.0..=90.0).contains(&lat) {
+            return Err(GeoError {
+                kind: GeoErrorKind::MalformedCoordinates(format!(
+                    "bbox out of range: longitude {}, latitude {} (must be lon ∈ [-180,180], lat ∈ [-90,90])",
+                    lon, lat
+                )),
+                path: path.to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_bbox(bbox: &Option<Vec<f64>>, path: &str) -> Result<(), GeoError> {
+    match bbox {
+        None => Ok(()),
+        Some(vals) => validate_bbox_values(vals, &child(path, "bbox")),
+    }
+}
+
+fn validate_geometry_at(g: &Geometry, path: &str) -> Result<(), GeoError> {
+    let coords_path = child(path, "coordinates");
+    match g {
+        Geometry::Point { coordinates } => validate_position(coordinates, &coords_path),
+        Geometry::MultiPoint { coordinates } | Geometry::LineString { coordinates } => {
+            for (i, p) in coordinates.iter().enumerate() {
+                validate_position(p, &index(&coords_path, i))?;
+            }
+            Ok(())
+        }
+        Geometry::MultiLineString { coordinates } => {
+            for (i, line) in coordinates.iter().enumerate() {
+                let lp = index(&coords_path, i);
+                for (j, p) in line.iter().enumerate() {
+                    validate_position(p, &index(&lp, j))?;
+                }
+            }
+            Ok(())
+        }
+        Geometry::Polygon { coordinates } => {
+            for (i, ring) in coordinates.iter().enumerate() {
+                validate_ring(ring, &index(&coords_path, i))?;
+            }
+            Ok(())
+        }
+        Geometry::MultiPolygon { coordinates } => {
+            for (i, polygon) in coordinates.iter().enumerate() {
+                let pp = index(&coords_path, i);
+                for (j, ring) in polygon.iter().enumerate() {
+                    validate_ring(ring, &index(&pp, j))?;
+                }
+            }
+            Ok(())
+        }
+        Geometry::GeometryCollection { geometries } => {
+            let gp = child(path, "geometries");
+            for (i, geometry) in geometries.iter().enumerate() {
+                validate_geometry_at(geometry, &index(&gp, i))?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn validate_geometry_object_at(g: &GeometryObject, path: &str) -> Result<(), GeoError> {
+    validate_bbox(&g.bbox, path)?;
+    validate_geometry_at(&g.geometry, path)
+}
+
+fn validate_feature_at(f: &Feature, path: &str) -> Result<(), GeoError> {
+    validate_bbox(&f.bbox, path)?;
+    match &f.geometry {
+        None => Ok(()),
+        Some(g) => validate_geometry_at(g, &child(path, "geometry")),
+    }
+}
+
+fn validate_feature_collection_at(fc: &FeatureCollection, path: &str) -> Result<(), GeoError> {
+    validate_bbox(&fc.bbox, path)?;
+    let features_path = child(path, "features");
+    for (i, f) in fc.features.iter().enumerate() {
+        validate_feature_at(f, &index(&features_path, i))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
