@@ -1,7 +1,7 @@
 # AGENTS.md
 
 Rust Cargo workspace: 5 independent parser crates under `tpt-*/`, resolver = "2",
-edition 2021, MSRV **1.70** (set in `[workspace.package]`). Shared metadata and
+edition 2021, MSRV **1.71** (set in `[workspace.package]`). Shared metadata and
 deps come from the root `Cargo.toml` via `workspace = true`; do not hardcode them
 in member crates.
 

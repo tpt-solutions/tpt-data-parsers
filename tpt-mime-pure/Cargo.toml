@@ -14,3 +14,10 @@ readme = "README.md"
 [features]
 default = ["std"]
 std = []
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "bench"
+harness = false

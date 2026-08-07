@@ -32,7 +32,7 @@ for result in parse_jsonl(BufReader::new(f)) {
 
 ```toml
 [dependencies]
-tpt-jsonl-stream = { version = "0.1", features = ["simd"] }
+tpt-jsonl-stream = { version = "0.2", features = ["simd"] }
 ```
 
 Requires an AVX2-capable CPU. Falls back to standard parsing on unsupported hardware at compile time.
@@ -70,6 +70,14 @@ let mut buf = Cursor::new(Vec::new());
 }
 assert_eq!(String::from_utf8(buf.into_inner()).unwrap(), "{\"a\":1}\n{\"b\":2}\n");
 ```
+
+## Why another JSONL crate?
+
+Rolling your own `lines().map(from_str)` works, but drops line numbers and
+allocates a buffer per line; `serde_json::Deserializer::from_reader` handles one
+concatenated stream but not mixed or blank-line `.jsonl`. `tpt-jsonl-stream`
+streams one value per line with precise line-numbered errors, a symmetric writer,
+and an optional SIMD fast path.
 
 ## License
 

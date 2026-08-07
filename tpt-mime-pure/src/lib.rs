@@ -74,6 +74,17 @@ pub enum MimeType {
     Elf,
     /// `application/x-msdownload`
     PeExe,
+    // Compressed / fonts / bytecode
+    /// `application/zstd`
+    Zstd,
+    /// `application/x-xz`
+    Xz,
+    /// `font/woff`
+    Woff,
+    /// `font/woff2`
+    Woff2,
+    /// `application/x-java-class`
+    JavaClass,
 }
 
 impl MimeType {
@@ -108,6 +119,11 @@ impl MimeType {
             Self::Wasm => "application/wasm",
             Self::Elf => "application/x-elf",
             Self::PeExe => "application/x-msdownload",
+            Self::Zstd => "application/zstd",
+            Self::Xz => "application/x-xz",
+            Self::Woff => "font/woff",
+            Self::Woff2 => "font/woff2",
+            Self::JavaClass => "application/x-java-class",
         }
     }
 
@@ -142,13 +158,20 @@ impl MimeType {
             Self::Wasm => "wasm",
             Self::Elf => "elf",
             Self::PeExe => "exe",
+            Self::Zstd => "zst",
+            Self::Xz => "xz",
+            Self::Woff => "woff",
+            Self::Woff2 => "woff2",
+            Self::JavaClass => "class",
         }
     }
 }
 
 /// Detect MIME type from the leading bytes of a file.
 ///
-/// Checks up to the first 512 bytes against known magic byte signatures.
+/// Checks the leading bytes against known magic byte signatures.
+/// [`detect_file`] reads up to 8 KB from disk; all built-in signatures are
+/// found within the first 512 bytes, so shorter slices work equally well.
 /// Returns `None` if no signature matches.
 ///
 /// # Example
@@ -304,6 +327,27 @@ pub fn detect(bytes: &[u8]) -> Option<MimeType> {
         return Some(MimeType::Tiff);
     }
 
+    // Zstandard: 28 4D 18 09
+    if starts_with!([0x28, 0x4D, 0x18, 0x09]) {
+        return Some(MimeType::Zstd);
+    }
+    // XZ: FD 37 7A 58 5A 00
+    if starts_with!([0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00]) {
+        return Some(MimeType::Xz);
+    }
+    // WOFF: "wOFF"
+    if starts_with!([0x77, 0x4F, 0x46, 0x46]) {
+        return Some(MimeType::Woff);
+    }
+    // WOFF2: "wOF2"
+    if starts_with!([0x77, 0x4F, 0x46, 0x32]) {
+        return Some(MimeType::Woff2);
+    }
+    // Java class file: CA FE BA BE
+    if starts_with!([0xCA, 0xFE, 0xBA, 0xBE]) {
+        return Some(MimeType::JavaClass);
+    }
+
     None
 }
 
@@ -413,18 +457,33 @@ pub fn detect_by_extension(ext: &str) -> Option<MimeType> {
     if eq("exe") || eq("dll") {
         return Some(MimeType::PeExe);
     }
+    if eq("zst") {
+        return Some(MimeType::Zstd);
+    }
+    if eq("xz") {
+        return Some(MimeType::Xz);
+    }
+    if eq("woff") {
+        return Some(MimeType::Woff);
+    }
+    if eq("woff2") {
+        return Some(MimeType::Woff2);
+    }
+    if eq("class") {
+        return Some(MimeType::JavaClass);
+    }
 
     None
 }
 
-/// Read up to 512 bytes from `path` and detect the MIME type.
+/// Read up to 8 KB from `path` and detect the MIME type.
 ///
 /// Falls back to `None` if the magic bytes are not recognised.
 /// Requires the `std` feature (enabled by default).
 #[cfg(feature = "std")]
 pub fn detect_file(path: impl AsRef<std::path::Path>) -> std::io::Result<Option<MimeType>> {
     use std::io::Read;
-    let mut buf = [0u8; 512];
+    let mut buf = [0u8; 8192];
     let mut f = std::fs::File::open(path)?;
     let n = f.read(&mut buf)?;
     Ok(detect(&buf[..n]))
@@ -476,6 +535,49 @@ mod tests {
     #[test]
     fn pe_exe() {
         assert_eq!(detect(&[0x4D, 0x5A, 0x90, 0x00]), Some(MimeType::PeExe));
+    }
+
+    #[test]
+    fn zstd() {
+        assert_eq!(
+            detect(&[0x28, 0x4D, 0x18, 0x09, 0x00]),
+            Some(MimeType::Zstd)
+        );
+    }
+
+    #[test]
+    fn xz() {
+        assert_eq!(
+            detect(&[0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00]),
+            Some(MimeType::Xz)
+        );
+    }
+
+    #[test]
+    fn woff() {
+        assert_eq!(detect(&[0x77, 0x4F, 0x46, 0x46]), Some(MimeType::Woff));
+    }
+
+    #[test]
+    fn woff2() {
+        assert_eq!(detect(&[0x77, 0x4F, 0x46, 0x32]), Some(MimeType::Woff2));
+    }
+
+    #[test]
+    fn java_class() {
+        assert_eq!(
+            detect(&[0xCA, 0xFE, 0xBA, 0xBE, 0x00]),
+            Some(MimeType::JavaClass)
+        );
+    }
+
+    #[test]
+    fn ext_compressed_font_bytecode_variants() {
+        assert_eq!(detect_by_extension("zst"), Some(MimeType::Zstd));
+        assert_eq!(detect_by_extension("xz"), Some(MimeType::Xz));
+        assert_eq!(detect_by_extension("woff"), Some(MimeType::Woff));
+        assert_eq!(detect_by_extension("woff2"), Some(MimeType::Woff2));
+        assert_eq!(detect_by_extension("class"), Some(MimeType::JavaClass));
     }
 
     #[test]

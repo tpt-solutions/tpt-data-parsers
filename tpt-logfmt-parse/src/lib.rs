@@ -255,6 +255,71 @@ pub fn parse_to_map(input: &str) -> Result<HashMap<String, String>, LogfmtError>
     Ok(map)
 }
 
+/// Serialize a single `key=value` field into logfmt form.
+///
+/// The key and value are quoted (with `"` and `\` escaped) when they contain a
+/// space, quote, backslash, or `=`, or are empty — mirroring the quoting rules
+/// the parser expects.
+///
+/// # Example
+///
+/// ```
+/// use tpt_logfmt_parse::format_pair;
+/// assert_eq!(format_pair("level", "info"), "level=info");
+/// assert_eq!(format_pair("msg", "hello world"), r#"msg="hello world""#);
+/// ```
+pub fn format_pair(key: &str, value: &str) -> String {
+    let mut out = String::with_capacity(key.len() + value.len() + 3);
+    out.push_str(&quote_token(key));
+    out.push('=');
+    out.push_str(&quote_token(value));
+    out
+}
+
+/// Serialize an iterator of `(key, value)` pairs into a single logfmt line.
+///
+/// # Example
+///
+/// ```
+/// use tpt_logfmt_parse::write_logfmt;
+/// let line = write_logfmt(vec![("level", "info"), ("msg", "hello world")]);
+/// assert_eq!(line, r#"level=info msg="hello world""#);
+/// ```
+pub fn write_logfmt<'a, I>(pairs: I) -> String
+where
+    I: IntoIterator<Item = (&'a str, &'a str)>,
+{
+    let mut out = String::new();
+    for (i, (k, v)) in pairs.into_iter().enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        out.push_str(&format_pair(k, v));
+    }
+    out
+}
+
+fn needs_quoting(s: &str) -> bool {
+    s.is_empty() || s.chars().any(|c| matches!(c, ' ' | '"' | '\\' | '='))
+}
+
+fn quote_token(s: &str) -> String {
+    if !needs_quoting(s) {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -339,5 +404,29 @@ mod tests {
             .collect::<Result<_, _>>()
             .unwrap();
         assert_eq!(pairs[0], ("msg", "café ☕"));
+    }
+
+    #[test]
+    fn write_logfmt_basic() {
+        let line = write_logfmt(vec![("level", "info"), ("msg", "hello world")]);
+        assert_eq!(line, r#"level=info msg="hello world""#);
+    }
+
+    #[test]
+    fn write_logfmt_quotes_special_chars() {
+        assert_eq!(
+            write_logfmt(vec![("msg", r#"say "hi""#)]),
+            r#"msg="say \"hi\"""#
+        );
+        assert_eq!(write_logfmt(vec![("a", "b=c")]), r#"a="b=c""#);
+        assert_eq!(write_logfmt(vec![("empty", "")]), r#"empty="""#);
+    }
+
+    #[test]
+    fn write_logfmt_round_trips_with_parser() {
+        let line = write_logfmt(vec![("level", "info"), ("msg", "hello world")]);
+        let map = parse_to_map(&line).unwrap();
+        assert_eq!(map["level"], "info");
+        assert_eq!(map["msg"], "hello world");
     }
 }

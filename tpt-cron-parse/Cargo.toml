@@ -17,6 +17,16 @@ chrono = { version = "0.4", optional = true }
 [features]
 chrono = ["dep:chrono"]
 
+[package.metadata.docs.rs]
+all-features = true
+
 [[example]]
 name = "next_run"
 required-features = ["chrono"]
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "bench"
+harness = false

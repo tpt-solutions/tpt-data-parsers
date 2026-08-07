@@ -224,6 +224,47 @@ impl CronExpr {
     }
 }
 
+/// An iterator over the firing times of a [`CronExpr`], strictly after a starting
+/// point. Each call to [`Iterator::next`] advances past the previously yielded time.
+///
+/// Only available with the `chrono` feature.
+#[cfg(feature = "chrono")]
+pub struct Upcoming {
+    expr: CronExpr,
+    after: chrono::DateTime<chrono::Utc>,
+}
+
+#[cfg(feature = "chrono")]
+impl Iterator for Upcoming {
+    type Item = chrono::DateTime<chrono::Utc>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let next = self.expr.next_after(self.after)?;
+        self.after = next;
+        Some(next)
+    }
+}
+
+#[cfg(feature = "chrono")]
+impl CronExpr {
+    /// Return an [`Upcoming`] iterator yielding the firing times of this schedule
+    /// strictly after `after`.
+    ///
+    /// ```rust,ignore
+    /// use tpt_cron_parse::CronExpr;
+    /// use chrono::{TimeZone, Utc};
+    /// let expr = CronExpr::parse("0 9 * * *").unwrap();
+    /// let after = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    /// let next_three: Vec<_> = expr.upcoming(after).take(3).collect();
+    /// ```
+    pub fn upcoming(&self, after: chrono::DateTime<chrono::Utc>) -> Upcoming {
+        Upcoming {
+            expr: self.clone(),
+            after,
+        }
+    }
+}
+
 /// Expand a [`CronField`] into the sorted, de-duplicated set of values it
 /// permits within the inclusive `[min, max]` range.
 #[cfg(feature = "chrono")]
@@ -707,6 +748,20 @@ mod tests {
         let expr = CronExpr::parse("0 0 30 2 *").unwrap();
         let after = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
         assert!(expr.next_after(after).is_none());
+    }
+
+    #[cfg(feature = "chrono")]
+    #[test]
+    fn upcoming_yields_multiple_runs() {
+        use chrono::{Datelike, TimeZone, Timelike, Utc};
+        let expr = CronExpr::parse("0 9 * * *").unwrap();
+        let after = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let times: Vec<_> = expr.upcoming(after).take(3).collect();
+        assert_eq!(times.len(), 3);
+        assert_eq!(times[0].day(), 1);
+        assert_eq!(times[1].day(), 2);
+        assert_eq!(times[2].day(), 3);
+        assert!(times.iter().all(|t| t.hour() == 9 && t.minute() == 0));
     }
 
     #[test]

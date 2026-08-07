@@ -54,7 +54,7 @@ to compute the next firing time of a schedule:
 
 ```toml
 [dependencies]
-tpt-cron-parse = { version = "0.1", features = ["chrono"] }
+tpt-cron-parse = { version = "0.2", features = ["chrono"] }
 ```
 
 ```rust,ignore
@@ -68,6 +68,13 @@ let next = expr.next_after(after).unwrap(); // next weekday at 09:00
 
 `next_after` respects the standard cron day-of-month / day-of-week OR rule and
 searches at most ~4 years ahead (the maximum period of a cron schedule).
+
+## Why another cron parser?
+
+The popular `cron` crate is excellent for scheduling, but its parse errors are
+cryptic (e.g. `"expected digit at index 4"`). `tpt-cron-parse` pinpoints the exact
+field, byte position, what was expected, and what was found, and can render a
+schedule back as plain English — useful for CLIs, logs, and UIs.
 
 ## License
 

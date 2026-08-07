@@ -3,6 +3,8 @@
 A Rust workspace of ultra-fast, zero-allocation parsers for formats the broader
 ecosystem ignores.
 
+[![CI](https://github.com/tpt-solutions/tpt-data-parsers/actions/workflows/ci.yml/badge.svg)](https://github.com/tpt-solutions/tpt-data-parsers/actions/workflows/ci.yml)
+
 Each crate is published independently to [crates.io](https://crates.io) and is
 designed to be dropped into a pipeline, a log shipper, or a constrained
 (`no_std`) target without pulling in a heavy dependency tree.
@@ -16,6 +18,7 @@ designed to be dropped into a pipeline, a log shipper, or a constrained
 | [`tpt-logfmt-parse`](./tpt-logfmt-parse) | Zero-copy logfmt (`key=value`) parser | [![crates.io](https://img.shields.io/crates/v/tpt-logfmt-parse.svg)](https://crates.io/crates/tpt-logfmt-parse) | [![docs.rs](https://docs.rs/tpt-logfmt-parse/badge.svg)](https://docs.rs/tpt-logfmt-parse) |
 | [`tpt-cron-parse`](./tpt-cron-parse) | Cron expression parser with human-readable output | [![crates.io](https://img.shields.io/crates/v/tpt-cron-parse.svg)](https://crates.io/crates/tpt-cron-parse) | [![docs.rs](https://docs.rs/tpt-cron-parse/badge.svg)](https://docs.rs/tpt-cron-parse) |
 | [`tpt-mime-pure`](./tpt-mime-pure) | Pure Rust MIME type detection via magic bytes (`no_std`) | [![crates.io](https://img.shields.io/crates/v/tpt-mime-pure.svg)](https://crates.io/crates/tpt-mime-pure) | [![docs.rs](https://docs.rs/tpt-mime-pure/badge.svg)](https://docs.rs/tpt-mime-pure) |
+| [`tpt-cli`](./tpt-cli) | Command-line front-end for all five parsers (CLI, not a library) | — | — |
 
 ## Which crate do I need?
 
@@ -47,9 +50,9 @@ If you only have a filename/path rather than raw bytes, `tpt-mime-pure`'s
 
 ## Workspace & contributing
 
-- This is a Cargo workspace (`resolver = "2"`, edition 2021, MSRV 1.70). Shared
-  metadata lives in the root `Cargo.toml` via `workspace = true`; member crates
-  must not hardcode it.
+- This is a Cargo workspace (`resolver = "2"`, edition 2021, MSRV 1.71). Shared
+   metadata lives in the root `Cargo.toml` via `workspace = true`; member crates
+   must not hardcode it. MSRV is **1.71**.
 - See [`AGENTS.md`](./AGENTS.md) for the exact verify/test/publish commands
   (`cargo fmt` / `cargo clippy -D warnings` / `cargo test`), and per-crate
   publishing on `v*.*.*` tags.

@@ -5,11 +5,19 @@ members = [
     "tpt-logfmt-parse",
     "tpt-cron-parse",
     "tpt-mime-pure",
+    "tpt-cli",
+]
+exclude = [
+    "tpt-jsonl-stream/fuzz",
+    "tpt-geo-geojson/fuzz",
+    "tpt-logfmt-parse/fuzz",
+    "tpt-cron-parse/fuzz",
+    "tpt-mime-pure/fuzz",
 ]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.71"
 license = "MIT OR Apache-2.0"

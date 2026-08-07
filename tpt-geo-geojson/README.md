@@ -65,6 +65,14 @@ let out = tpt_geo_geojson::to_json(&f).unwrap();
 assert!(out.contains(r#""title":"hi""#));
 ```
 
+## Why another GeoJSON crate?
+
+The `geojson` crate focuses on deserialization and leaves validation to you, so
+malformed data — wrong coordinate depth, unclosed rings, out-of-range
+latitude/longitude — flows downstream and can panic mapping libraries.
+`tpt-geo-geojson` runs a strict validation pass and reports the exact path of any
+problem.
+
 ## License
 
 Licensed under either of [Apache License 2.0](../LICENSE-APACHE) or [MIT](../LICENSE-MIT) at your option.

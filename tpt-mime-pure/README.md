@@ -46,7 +46,7 @@ let mime = detect_file("/path/to/file.jpg").unwrap();
 
 ```toml
 [dependencies]
-tpt-mime-pure = { version = "0.1", default-features = false }
+tpt-mime-pure = { version = "0.2", default-features = false }
 ```
 
 ## Supported Types
@@ -81,6 +81,18 @@ tpt-mime-pure = { version = "0.1", default-features = false }
 | `Wasm` | `application/wasm` | `\0asm` |
 | `Elf` | `application/x-elf` | `\x7FELF` |
 | `PeExe` | `application/x-msdownload` | `MZ` |
+| `Zstd` | `application/zstd` | `28 4D 18 09` |
+| `Xz` | `application/x-xz` | `FD 37 7A 58 5A 00` |
+| `Woff` | `font/woff` | `wOFF` |
+| `Woff2` | `font/woff2` | `wOF2` |
+| `JavaClass` | `application/x-java-class` | `CA FE BA BE` |
+
+## Why another MIME detector?
+
+`mime_guess` only does extension-based guessing, and `infer` / `tree_magic` pull in
+larger dependency trees. `tpt-mime-pure` is zero-dependency, `no_std`-capable, and
+detects from **magic bytes** — so it works wherever the `file` binary isn't
+available (minimal containers, WASM, embedded).
 
 ## License
 

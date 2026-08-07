@@ -50,3 +50,18 @@ jobs:
 
       - name: test tpt-mime-pure (no_std)
         run: cargo test --no-default-features -p tpt-mime-pure
+
+  fuzz:
+    name: Fuzz targets (nightly, non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: Install cargo-fuzz
+        run: cargo +nightly install cargo-fuzz --locked
+      - name: Build fuzz targets
+        run: |
+          for c in tpt-jsonl-stream tpt-geo-geojson tpt-logfmt-parse tpt-cron-parse tpt-mime-pure; do
+            (cd "$c/fuzz" && cargo +nightly fuzz build)
+          done

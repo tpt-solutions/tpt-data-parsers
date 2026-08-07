@@ -1,0 +1,20 @@
+[package]
+name = "tpt-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Command-line front-end for the tpt-data-parsers workspace (cron, mime, geojson, jsonl, logfmt)"
+readme = "README.md"
+publish = false
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+chrono = "0.4"
+tpt-jsonl-stream = { path = "../tpt-jsonl-stream" }
+tpt-geo-geojson = { path = "../tpt-geo-geojson" }
+tpt-logfmt-parse = { path = "../tpt-logfmt-parse" }
+tpt-cron-parse = { path = "../tpt-cron-parse", features = ["chrono"] }
+tpt-mime-pure = { path = "../tpt-mime-pure" }

@@ -37,6 +37,14 @@ let map = parse_to_map(r#"level=error msg="disk full" retries=3"#).unwrap();
 println!("{}", map["msg"]); // disk full
 ```
 
+## Why another logfmt parser?
+
+Most Rust logfmt handling either reaches for a full regex engine or a
+general-purpose key/value splitter that allocates per pair. `tpt-logfmt-parse` is
+hand-rolled (no `regex`), **zero-copy in the iterator path**, and handles the
+tricky cases — quoted strings, `\"` / `\\` escapes, bare keys — that naive
+split-on-space approaches get wrong.
+
 ## License
 
 Licensed under either of [Apache License 2.0](../LICENSE-APACHE) or [MIT](../LICENSE-MIT) at your option.

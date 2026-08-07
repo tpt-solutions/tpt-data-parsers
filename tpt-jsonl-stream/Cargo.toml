@@ -21,3 +21,13 @@ simd = ["dep:simd-json"]
 [dependencies.simd-json]
 version = "0.13"
 optional = true
+
+[package.metadata.docs.rs]
+all-features = true
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "bench"
+harness = false

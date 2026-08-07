@@ -10,3 +10,10 @@ description = "Zero-copy, high-performance logfmt (key=value) parser with no dep
 keywords = ["logfmt", "log", "parser", "structured-logging", "key-value"]
 categories = ["parsing", "development-tools::debugging"]
 readme = "README.md"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "bench"
+harness = false

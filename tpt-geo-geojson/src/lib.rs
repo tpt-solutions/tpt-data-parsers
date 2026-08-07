@@ -283,11 +283,31 @@ pub fn to_json(value: &GeoJson) -> Result<String, GeoError> {
 /// Extract the optional `bbox` array and any non-standard members from `v`,
 /// excluding the `known` field names. Used to preserve `bbox` and foreign
 /// members across a parse/serialize round-trip.
-fn collect_extra(v: &Value, known: &[&str]) -> (Option<Vec<f64>>, HashMap<String, Value>) {
-    let bbox = v
-        .get("bbox")
-        .and_then(Value::as_array)
-        .map(|arr| arr.iter().filter_map(Value::as_f64).collect::<Vec<f64>>());
+type CollectedExtra = (Option<Vec<f64>>, HashMap<String, Value>);
+
+fn collect_extra(v: &Value, known: &[&str], path: &str) -> Result<CollectedExtra, GeoError> {
+    let bbox = match v.get("bbox") {
+        None => None,
+        Some(b) => {
+            let arr = b.as_array().ok_or_else(|| GeoError {
+                kind: GeoErrorKind::MalformedCoordinates("bbox must be an array".into()),
+                path: format!("{}.bbox", path),
+            })?;
+            let vals: Vec<f64> = arr.iter().filter_map(Value::as_f64).collect();
+            // RFC 7946: a bbox is [west, south, east, north] (+ optional altitude
+            // pairs), so it must have an even length of at least 4.
+            if vals.len() < 4 || vals.len() % 2 != 0 {
+                return Err(GeoError {
+                    kind: GeoErrorKind::MalformedCoordinates(format!(
+                        "bbox must have an even length >= 4, got {}",
+                        vals.len()
+                    )),
+                    path: format!("{}.bbox", path),
+                });
+            }
+            Some(vals)
+        }
+    };
     let foreign = v
         .as_object()
         .map(|obj| {
@@ -297,7 +317,7 @@ fn collect_extra(v: &Value, known: &[&str]) -> (Option<Vec<f64>>, HashMap<String
                 .collect::<HashMap<String, Value>>()
         })
         .unwrap_or_default();
-    (bbox, foreign)
+    Ok((bbox, foreign))
 }
 
 fn parse_value(v: &Value, path: &str) -> Result<GeoJson, GeoError> {
@@ -330,7 +350,7 @@ fn parse_value(v: &Value, path: &str) -> Result<GeoJson, GeoError> {
                 let fp = format!("{}features[{}]", prefix, i);
                 features.push(parse_feature(fv, &fp)?);
             }
-            let (bbox, foreign_members) = collect_extra(v, &["type", "features", "bbox"]);
+            let (bbox, foreign_members) = collect_extra(v, &["type", "features", "bbox"], path)?;
             Ok(GeoJson::FeatureCollection(FeatureCollection {
                 features,
                 bbox,
@@ -371,7 +391,7 @@ fn parse_feature(v: &Value, path: &str) -> Result<Feature, GeoError> {
     let properties = v.get("properties").cloned();
     let id = v.get("id").cloned();
     let (bbox, foreign_members) =
-        collect_extra(v, &["type", "geometry", "properties", "id", "bbox"]);
+        collect_extra(v, &["type", "geometry", "properties", "id", "bbox"], path)?;
 
     Ok(Feature {
         geometry,
@@ -427,12 +447,7 @@ fn parse_geometry(v: &Value, path: &str) -> Result<Geometry, GeoError> {
             let mut lines = Vec::with_capacity(arr.len());
             for (i, line_val) in arr.iter().enumerate() {
                 let lp = format!("{}[{}]", coords_path, i);
-                let line_arr = line_val.as_array().ok_or_else(|| GeoError {
-                    kind: GeoErrorKind::MalformedCoordinates("expected array".into()),
-                    path: lp.clone(),
-                })?;
                 lines.push(parse_position_array(line_val, &lp)?);
-                let _ = line_arr;
             }
             Ok(Geometry::MultiLineString { coordinates: lines })
         }
@@ -502,7 +517,7 @@ fn parse_position(v: &Value, path: &str) -> Result<Position, GeoError> {
             path: path.to_owned(),
         });
     }
-    let coords: Result<Vec<f64>, _> = arr
+    let coords: Vec<f64> = arr
         .iter()
         .map(|n| {
             n.as_f64().ok_or_else(|| GeoError {
@@ -510,8 +525,19 @@ fn parse_position(v: &Value, path: &str) -> Result<Position, GeoError> {
                 path: path.to_owned(),
             })
         })
-        .collect();
-    Position::new(coords?)
+        .collect::<Result<Vec<f64>, _>>()?;
+    // RFC 7946 §3.1.1: longitude ∈ [-180, 180], latitude ∈ [-90, 90].
+    let (lon, lat) = (coords[0], coords[1]);
+    if !(-180.0..=180.0).contains(&lon) || !(-90.0..=90.0).contains(&lat) {
+        return Err(GeoError {
+            kind: GeoErrorKind::MalformedCoordinates(format!(
+                "coordinate out of range: longitude {}, latitude {} (must be lon ∈ [-180,180], lat ∈ [-90,90])",
+                lon, lat
+            )),
+            path: path.to_owned(),
+        });
+    }
+    Position::new(coords)
 }
 
 fn parse_position_array(v: &Value, path: &str) -> Result<Vec<Position>, GeoError> {
@@ -762,5 +788,32 @@ mod tests {
         let json = to_json(&geo).unwrap();
         assert!(json.contains(r#""title":"hello""#));
         assert!(json.contains(r#""extra":42"#));
+    }
+
+    #[test]
+    fn error_on_out_of_range_coordinate() {
+        let s = r#"{"type":"Point","coordinates":[200.0,10.0]}"#;
+        let err = parse(s).unwrap_err();
+        assert!(matches!(err.kind, GeoErrorKind::MalformedCoordinates(_)));
+        let s2 = r#"{"type":"Point","coordinates":[10.0,200.0]}"#;
+        assert!(matches!(
+            parse(s2).unwrap_err().kind,
+            GeoErrorKind::MalformedCoordinates(_)
+        ));
+    }
+
+    #[test]
+    fn error_on_odd_length_bbox() {
+        let s = r#"{"type":"FeatureCollection","bbox":[0,0,10],"features":[]}"#;
+        let err = parse(s).unwrap_err();
+        assert!(matches!(err.kind, GeoErrorKind::MalformedCoordinates(_)));
+        assert!(err.path.contains("bbox"));
+    }
+
+    #[test]
+    fn error_on_non_array_bbox() {
+        let s = r#"{"type":"FeatureCollection","bbox":"bad","features":[]}"#;
+        let err = parse(s).unwrap_err();
+        assert!(matches!(err.kind, GeoErrorKind::MalformedCoordinates(_)));
     }
 }
