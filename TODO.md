@@ -91,8 +91,8 @@
 - [x] `cargo doc --workspace --no-deps` (no warnings)
 - [x] All crates: description, keywords, categories, repository in Cargo.toml
 - [x] Write `CHANGELOG.md` for each crate (0.2.0 entry) — created in Phase 16 (was falsely marked done earlier; no file existed)
-- [ ] Push to GitHub, verify CI passes
-- [ ] Tag `v0.2.0` to trigger publish (Phase 10 v0.2.0 features already merged; first publish is 0.2.0, not 0.1.0)
+- [x] Push to GitHub, verify CI passes
+- [x] Tag `v0.2.0` to trigger publish (Phase 10 v0.2.0 features already merged; first publish is 0.2.0, not 0.1.0)
 
 ## Phase 7: Pre-publish bug fixes (from platform review)
 - [x] `tpt-mime-pure`: inspect `ftyp` box brand string instead of always returning `Mp4` (fixes HEIC/HEIF/AVIF/MOV/3GP misdetection)
@@ -135,22 +135,22 @@
 - [ ] Add a short "vs. alternatives" line to each crate `README.md` (why this crate over `cron`/`geojson`/`mime_guess`/etc.)
 
 ## Phase 13: Automation & quality scaffolding
-- [ ] Add Criterion benchmarks (`benches/`) to all 5 crates to substantiate the "zero-allocation/ultra-fast" claims
-- [ ] Add `cargo-fuzz` targets for all 5 crates + a nightly, non-blocking CI smoke-test job
+- [x] Add Criterion benchmarks (`benches/`) to all 5 crates to substantiate the "zero-allocation/ultra-fast" claims
+- [x] Add `cargo-fuzz` targets for all 5 crates + a nightly, non-blocking CI smoke-test job
 - [ ] Manual/deferred: add Dependabot auto-merge workflow for passing patch-level bumps
 - [ ] Manual/deferred: merge open Dependabot PRs (`serde` 1.0.229, `serde_json` 1.0.151)
 - [ ] Manual/deferred: delete stale merged remote branches (`claude/crates-io-publish-check-cp1o6v`, `claude/crates-io-readiness-ljshrm`)
 
 ## Phase 14: v0.3.0 feature candidates
-- [ ] `tpt-logfmt-parse`: add `write_logfmt` — the only crate in the workspace without a writer (mirrors `JsonlWriter`/`to_json`)
-- [ ] `tpt-cron-parse`: add `CronExpr::upcoming` iterator for "next N runs" (builds on existing `next_after`, same `chrono` feature gate)
-- [ ] `tpt-mime-pure`: add Zstandard, XZ, WOFF/WOFF2, and Java `.class` magic-byte signatures
+- [x] `tpt-logfmt-parse`: add `write_logfmt` — the only crate in the workspace without a writer (mirrors `JsonlWriter`/`to_json`)
+- [x] `tpt-cron-parse`: add `CronExpr::upcoming` iterator for "next N runs" (builds on existing `next_after`, same `chrono` feature gate)
+- [x] `tpt-mime-pure`: add Zstandard, XZ, WOFF/WOFF2, and Java `.class` magic-byte signatures
 
 ## Phase 15: `tpt-cli` (new workspace member)
-- [ ] Scaffold `tpt-cli` binary crate depending on all 5 parser crates, with `cron`/`mime`/`geojson`/`jsonl`/`logfmt` subcommands via `clap`
-- [ ] Write `tpt-cli/README.md`
-- [ ] Add `tpt-cli` to root `README.md` crate table, marked "(CLI, not a library)"
-- [ ] Deliberately leave `tpt-cli` out of `publish.yml` — publishing stays a manual decision
+- [x] Scaffold `tpt-cli` binary crate depending on all 5 parser crates, with `cron`/`mime`/`geojson`/`jsonl`/`logfmt` subcommands via `clap`
+- [x] Write `tpt-cli/README.md`
+- [x] Add `tpt-cli` to root `README.md` crate table, marked "(CLI, not a library)"
+- [x] Deliberately leave `tpt-cli` out of `publish.yml` — publishing stays a manual decision
 
 ## Phase 16: Parser hardening (2026-08-08 review)
 - [x] `tpt-geo-geojson`: strict coordinate-range validation — reject longitude ∉ [-180,180] or latitude ∉ [-90,90] in `parse_position` (spec promises "strict validation"; `[1000,2000]` is currently accepted)
