@@ -1,8 +1,9 @@
 #![doc = include_str!("../README.md")]
 #![warn(missing_docs)]
 
+use serde::de::{self, Deserializer};
 use serde::ser::SerializeMap;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -595,6 +596,56 @@ pub fn to_json(value: &GeoJson) -> Result<String, GeoError> {
     })
 }
 
+// ---- Deserialize impls ----
+//
+// Each type deserializes via `serde_json::Value` and then runs through the same
+// validating `parse_*` function [`parse`] itself uses, so a value built with
+// `serde_json::from_value`/`#[derive(Deserialize)]` gets exactly the same
+// construction-time guarantees (position bounds, ring closure, bbox shape, ...)
+// as one produced by [`parse`].
+
+impl<'de> Deserialize<'de> for Position {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = Value::deserialize(deserializer)?;
+        parse_position(&value, "").map_err(de::Error::custom)
+    }
+}
+
+impl<'de> Deserialize<'de> for Geometry {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = Value::deserialize(deserializer)?;
+        parse_geometry(&value, "").map_err(de::Error::custom)
+    }
+}
+
+impl<'de> Deserialize<'de> for GeometryObject {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = Value::deserialize(deserializer)?;
+        parse_geometry_object(&value, "").map_err(de::Error::custom)
+    }
+}
+
+impl<'de> Deserialize<'de> for Feature {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = Value::deserialize(deserializer)?;
+        parse_feature(&value, "").map_err(de::Error::custom)
+    }
+}
+
+impl<'de> Deserialize<'de> for FeatureCollection {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = Value::deserialize(deserializer)?;
+        parse_feature_collection(&value, "").map_err(de::Error::custom)
+    }
+}
+
+impl<'de> Deserialize<'de> for GeoJson {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = Value::deserialize(deserializer)?;
+        parse_value(&value, "").map_err(de::Error::custom)
+    }
+}
+
 // ---- Internal parsing ----
 
 fn child(path: &str, member: &str) -> String {
@@ -625,6 +676,10 @@ fn json_type_name(v: &Value) -> &'static str {
 /// excluding the `known` field names. Used to preserve `bbox` and foreign
 /// members across a parse/serialize round-trip.
 type CollectedExtra = (Option<Vec<f64>>, BTreeMap<String, Value>);
+
+/// A parsed geometry together with its `bbox`/foreign members, as returned by
+/// [`parse_geometry_with_extra`].
+type GeometryWithExtra = (Geometry, Option<Vec<f64>>, BTreeMap<String, Value>);
 
 fn collect_extra(v: &Value, known: &[&str], path: &str) -> Result<CollectedExtra, GeoError> {
     let bbox_path = child(path, "bbox");
@@ -672,36 +727,12 @@ fn parse_value(v: &Value, path: &str) -> Result<GeoJson, GeoError> {
         })?;
 
     match type_str {
-        "FeatureCollection" => {
-            let features_val =
-                v.get("features")
-                    .and_then(Value::as_array)
-                    .ok_or_else(|| GeoError {
-                        kind: GeoErrorKind::InvalidType(
-                            "FeatureCollection missing 'features' array".into(),
-                        ),
-                        path: child(path, "features"),
-                    })?;
-            let features_path = child(path, "features");
-            let mut features = Vec::with_capacity(features_val.len());
-            for (i, fv) in features_val.iter().enumerate() {
-                features.push(parse_feature(fv, &index(&features_path, i))?);
-            }
-            let (bbox, foreign_members) = collect_extra(v, &["type", "features", "bbox"], path)?;
-            Ok(GeoJson::FeatureCollection(FeatureCollection {
-                features,
-                bbox,
-                foreign_members,
-            }))
-        }
+        "FeatureCollection" => Ok(GeoJson::FeatureCollection(parse_feature_collection(
+            v, path,
+        )?)),
         "Feature" => Ok(GeoJson::Feature(parse_feature(v, path)?)),
         _ => {
-            let geometry = parse_geometry(v, path)?;
-            let known: &[&str] = match geometry {
-                Geometry::GeometryCollection { .. } => &["type", "geometries", "bbox"],
-                _ => &["type", "coordinates", "bbox"],
-            };
-            let (bbox, foreign_members) = collect_extra(v, known, path)?;
+            let (geometry, bbox, foreign_members) = parse_geometry_with_extra(v, path)?;
             if bbox.is_none() && foreign_members.is_empty() {
                 Ok(GeoJson::Geometry(geometry))
             } else {
@@ -713,6 +744,59 @@ fn parse_value(v: &Value, path: &str) -> Result<GeoJson, GeoError> {
             }
         }
     }
+}
+
+fn parse_feature_collection(v: &Value, path: &str) -> Result<FeatureCollection, GeoError> {
+    if v.get("type").and_then(Value::as_str) != Some("FeatureCollection") {
+        return Err(GeoError {
+            kind: GeoErrorKind::InvalidType(format!(
+                "expected 'FeatureCollection', got {:?}",
+                v.get("type")
+            )),
+            path: child(path, "type"),
+        });
+    }
+    let features_val = v
+        .get("features")
+        .and_then(Value::as_array)
+        .ok_or_else(|| GeoError {
+            kind: GeoErrorKind::InvalidType("FeatureCollection missing 'features' array".into()),
+            path: child(path, "features"),
+        })?;
+    let features_path = child(path, "features");
+    let mut features = Vec::with_capacity(features_val.len());
+    for (i, fv) in features_val.iter().enumerate() {
+        features.push(parse_feature(fv, &index(&features_path, i))?);
+    }
+    let (bbox, foreign_members) = collect_extra(v, &["type", "features", "bbox"], path)?;
+    Ok(FeatureCollection {
+        features,
+        bbox,
+        foreign_members,
+    })
+}
+
+/// Parse a bare geometry object together with its `bbox`/foreign members,
+/// shared by [`parse_value`]'s top-level dispatch and `GeometryObject`'s
+/// [`Deserialize`] impl (which always wants the wrapper, even when the
+/// extras are empty).
+fn parse_geometry_with_extra(v: &Value, path: &str) -> Result<GeometryWithExtra, GeoError> {
+    let geometry = parse_geometry(v, path)?;
+    let known: &[&str] = match geometry {
+        Geometry::GeometryCollection { .. } => &["type", "geometries", "bbox"],
+        _ => &["type", "coordinates", "bbox"],
+    };
+    let (bbox, foreign_members) = collect_extra(v, known, path)?;
+    Ok((geometry, bbox, foreign_members))
+}
+
+fn parse_geometry_object(v: &Value, path: &str) -> Result<GeometryObject, GeoError> {
+    let (geometry, bbox, foreign_members) = parse_geometry_with_extra(v, path)?;
+    Ok(GeometryObject {
+        geometry,
+        bbox,
+        foreign_members,
+    })
 }
 
 fn parse_feature(v: &Value, path: &str) -> Result<Feature, GeoError> {
@@ -1458,5 +1542,64 @@ mod tests {
             coordinates: Position::new(vec![f64::NAN, 0.0]).unwrap(),
         });
         assert!(to_json(&geo).is_err());
+    }
+
+    #[test]
+    fn deserialize_feature_via_serde_json_from_value() {
+        // A user embedding `Feature` in their own `#[derive(Deserialize)]` struct,
+        // or calling `serde_json::from_value` directly, gets the same validation
+        // `parse` applies — this is what Phase 21's "no Deserialize" gap left out.
+        let v: Value = serde_json::from_str(
+            r#"{"type":"Feature","geometry":{"type":"Point","coordinates":[1.0,2.0]},"properties":{"name":"x"}}"#,
+        )
+        .unwrap();
+        let feature: Feature = serde_json::from_value(v).unwrap();
+        assert_eq!(
+            feature.geometry,
+            Some(Geometry::Point {
+                coordinates: Position::new(vec![1.0, 2.0]).unwrap(),
+            })
+        );
+    }
+
+    #[test]
+    fn deserialize_geo_json_round_trips_through_to_json() {
+        let original = parse(
+            r#"{"type":"FeatureCollection","features":[{"type":"Feature","geometry":{"type":"Point","coordinates":[0,0]},"properties":null}]}"#,
+        )
+        .unwrap();
+        let json = to_json(&original).unwrap();
+        let value: Value = serde_json::from_str(&json).unwrap();
+        let round_tripped: GeoJson = serde_json::from_value(value).unwrap();
+        assert_eq!(original, round_tripped);
+    }
+
+    #[test]
+    fn deserialize_rejects_invalid_geometry() {
+        // Out-of-range latitude must be rejected through the `Deserialize` entry
+        // point exactly as it is through `parse`, not just when reading a string.
+        let v: Value =
+            serde_json::from_str(r#"{"type":"Point","coordinates":[0.0,1000.0]}"#).unwrap();
+        let err = serde_json::from_value::<Geometry>(v).unwrap_err();
+        assert!(err.to_string().contains("malformed coordinates"));
+    }
+
+    #[test]
+    fn deserialize_rejects_unclosed_ring() {
+        let v: Value =
+            serde_json::from_str(r#"{"type":"Polygon","coordinates":[[[0,0],[4,0],[4,4],[0,4]]]}"#)
+                .unwrap();
+        assert!(serde_json::from_value::<Geometry>(v).is_err());
+    }
+
+    #[test]
+    fn deserialize_geometry_object_wraps_even_without_extras() {
+        // `GeometryObject`'s Deserialize always produces the wrapper type, unlike
+        // `parse_value`'s top-level dispatch which only wraps when bbox/foreign
+        // members are present.
+        let v: Value = serde_json::from_str(r#"{"type":"Point","coordinates":[1.0,2.0]}"#).unwrap();
+        let obj: GeometryObject = serde_json::from_value(v).unwrap();
+        assert!(obj.bbox.is_none());
+        assert!(obj.foreign_members.is_empty());
     }
 }

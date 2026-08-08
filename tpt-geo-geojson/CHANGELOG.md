@@ -16,6 +16,11 @@ and this crate adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.h
   polygons.
 - `BoundingBox::to_vec()` to recover the underlying coordinate list.
 - Bare top-level `Geometry` objects now collect and round-trip `bbox` and foreign members.
+- `Deserialize` for `Position`, `Geometry`, `GeometryObject`, `Feature`,
+  `FeatureCollection`, and `GeoJson`, routed through the same validation `parse` uses —
+  hand-constructed values (e.g. via `serde_json::from_value` or embedding these types in
+  your own `#[derive(Deserialize)]` struct) now get the same construction-time
+  guarantees as `parse`, closing the gap left when only `validate()` shipped earlier.
 
 ### Fixed
 

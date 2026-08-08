@@ -311,3 +311,41 @@
 - [x] `cron explain --verbose`: next 5 runs, DST transitions crossed, expanded field sets.
 - [x] Property-based round-trip tests (`proptest`): `write→parse==identity` (logfmt/jsonl); `parse→to_json→parse` (geojson).
 - [x] `tpt-cli`: batch/multi-path mode + `-r/--recursive`; `--quiet`; TTY color; watch mode; `-o/--output`; stdin for `logfmt` and `cron`.
+
+## Phase 24: 2026-08-09 platform review — verified bugs & gaps
+
+> Follow-up review that verified Phase 21–23's claimed fixes/features against the
+> current code (they held up) and looked for anything genuinely new. Four real,
+> independent issues found and fixed; a separate adoption/automation backlog was
+> also produced and left for prioritization (not yet scheduled as phases).
+
+- [x] `tpt-cli`: `jsonl --stats` reintroduced the OOM pattern Phase 21 fixed elsewhere —
+  `jsonl_stats` called `slurp_bytes(path)` (whole file into a `Vec<u8>`) purely to compute
+  MB/s from `bytes.len()`, defeating the streaming/checkpoint-resume design. Now streams via
+  `tpt_jsonl_stream::parse_jsonl` directly and reads total bytes from the reader's own
+  `byte_offset()`.
+- [x] `.github/ISSUE_TEMPLATE/bug_report.md` and `feature_request.md` used GitHub's YAML
+  issue-*forms* schema but were saved with a `.md` extension, so GitHub would not render
+  them as structured forms. Renamed to `.yml`.
+- [x] `tpt-cli/Cargo.toml` pinned `clap = ">=4.4, <4.5"`, uniquely narrow among the
+  workspace's dependencies and blocking all 4.5+ patch/security releases with no comment
+  explaining why. Relaxed to `"4.4"` (resolves to 4.6.6); `cargo test -p tpt-cli` and the CLI
+  integration suite still pass.
+- [x] `tpt-geo-geojson`: Phase 21's "no public `Deserialize` impls / no `validate()`" bullet
+  only shipped the `validate()` half — `Position`/`Geometry`/`GeometryObject`/`Feature`/
+  `FeatureCollection`/`GeoJson` derived `Serialize` only, so hand-constructed or
+  `serde_json::from_value`-built values couldn't round-trip through serde. Added
+  `Deserialize` for all six, routed through the same validating `parse_*` internals
+  `parse()` uses (extracted `parse_feature_collection`/`parse_geometry_with_extra`/
+  `parse_geometry_object` helpers so both entry points share one implementation).
+
+### Adoption/automation backlog (not yet scheduled — user to prioritize)
+- [ ] `SECURITY.md` with a vulnerability-disclosure contact.
+- [ ] Terminal demo (GIF/asciinema/VHS) embedded in root and `tpt-cli` READMEs.
+- [ ] One-line installer / `cargo-binstall` metadata / Homebrew tap / Scoop bucket for `tpt-cli`.
+- [ ] `CODE_OF_CONDUCT.md` and `.github/FUNDING.yml`.
+- [ ] Integration cookbook doc (e.g. `tpt-jsonl-stream` + `axum`, `tpt-logfmt-parse` + `tracing-subscriber`).
+- [ ] Decide (not an oversight, a choice): adopt `cargo-deny` for license/ban checks beyond
+  `cargo-audit`'s CVE scanning; whether a `tpt` meta-crate re-exporting all 5 is wanted
+  despite the "independent crates" philosophy; whether `release.yml` should migrate to
+  literal `cargo-dist` (would also solve the installer-script gap above).

@@ -1144,14 +1144,14 @@ fn jsonl_stats(
     let expanded = expand_paths(paths, recursive)?;
     let mut last: Result<(), String> = Ok(());
     for path in &expanded {
-        let bytes = slurp_bytes(path)?;
         let start = Instant::now();
-        let reader = BufReader::new(bytes.as_slice());
+        let reader = BufReader::new(open_read(path)?);
+        let mut jsonl_reader = tpt_jsonl_stream::parse_jsonl(reader);
         let mut records = 0u64;
         let mut errors = 0u64;
         let mut error_lines: Vec<u64> = Vec::new();
         let mut fields: HashMap<String, (u64, HashSet<String>)> = HashMap::new();
-        for res in tpt_jsonl_stream::parse_jsonl(reader) {
+        for res in jsonl_reader.by_ref() {
             match res {
                 Ok(v) => {
                     records += 1;
@@ -1170,7 +1170,8 @@ fn jsonl_stats(
             }
         }
         let elapsed = start.elapsed();
-        let mb_per_s = (bytes.len() as f64 / 1e6) / elapsed.as_secs_f64().max(1e-9);
+        let total_bytes = jsonl_reader.byte_offset();
+        let mb_per_s = (total_bytes as f64 / 1e6) / elapsed.as_secs_f64().max(1e-9);
 
         let mut field_json = serde_json::Map::new();
         let mut field_names: Vec<&String> = fields.keys().collect();
@@ -1191,7 +1192,7 @@ fn jsonl_stats(
         obj.insert("path".into(), serde_json::Value::String(path.clone()));
         obj.insert(
             "bytes".into(),
-            serde_json::Value::Number(bytes.len().into()),
+            serde_json::Value::Number(total_bytes.into()),
         );
         obj.insert(
             "elapsed_ms".into(),
