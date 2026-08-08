@@ -303,11 +303,11 @@
 - [x] `tpt-geo-geojson`: `Geometry::bounding_box` wrong across antimeridian; document or provide an antimeridian-aware variant.
 
 ## Phase 23: Innovation & usability backlog (non-blocking, from review)
-- [ ] `tpt sniff` as a streaming router: detect → dispatch → one normalised NDJSON envelope per input (the natural flagship over `file`/`jq`/`mlr`).
-- [ ] `tpt` `--stats` mode: counts, per-line error histogram, MB/s, field cardinality for jsonl/logfmt (turn validators into data-quality tools).
-- [ ] `MimeType` confidence scores (`Confidence::{Low,Medium,High}`) from signature length + anchoring.
-- [ ] Parallel JSONL parsing via `rayon` (beats the `simd` fast path; collected by construction).
-- [ ] jsonl checkpoint/resume (`byte_offset()` + `resume_at`) for multi-GB ingest.
-- [ ] `cron explain --verbose`: next 5 runs, DST transitions crossed, expanded field sets.
-- [ ] Property-based round-trip tests (`proptest`): `write→parse==identity` (logfmt/jsonl); `parse→to_json→parse` (geojson).
-- [ ] `tpt-cli`: batch/multi-path mode + `-r/--recursive`; `--quiet`; TTY color; watch mode; `-o/--output`; stdin for `logfmt` and `cron`.
+- [x] `tpt sniff` as a streaming router: detect → dispatch → one normalised NDJSON envelope per input (the natural flagship over `file`/`jq`/`mlr`).
+- [x] `tpt` `--stats` mode: counts, per-line error histogram, MB/s, field cardinality for jsonl/logfmt (turn validators into data-quality tools).
+- [x] `MimeType` confidence scores (`Confidence::{Low,Medium,High}`) from signature length + anchoring.
+- [x] Parallel JSONL parsing via `rayon` (beats the `simd` fast path; collected by construction).
+- [x] jsonl checkpoint/resume (`byte_offset()` + `resume_at`) for multi-GB ingest.
+- [x] `cron explain --verbose`: next 5 runs, DST transitions crossed, expanded field sets.
+- [x] Property-based round-trip tests (`proptest`): `write→parse==identity` (logfmt/jsonl); `parse→to_json→parse` (geojson).
+- [x] `tpt-cli`: batch/multi-path mode + `-r/--recursive`; `--quiet`; TTY color; watch mode; `-o/--output`; stdin for `logfmt` and `cron`.

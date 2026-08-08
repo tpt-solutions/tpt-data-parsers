@@ -32,7 +32,9 @@ fn arb_geometry() -> impl Strategy<Value = Geometry> {
         arb_position().prop_map(|p| Geometry::Point { coordinates: p }),
         proptest::collection::vec(arb_position(), 2..6)
             .prop_map(|pts| Geometry::LineString { coordinates: pts }),
-        arb_ring().prop_map(|ring| Geometry::Polygon { coordinates: vec![ring] }),
+        arb_ring().prop_map(|ring| Geometry::Polygon {
+            coordinates: vec![ring]
+        }),
     ]
 }
 

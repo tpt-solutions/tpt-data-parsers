@@ -509,7 +509,9 @@ fn run(cli: &Cli, format: OutputFormat, out: &mut Output) -> Result<(), String> 
                 if matches!(category, SniffCategory::Unknown) {
                     any_unknown = true;
                 }
-                results.push(category_to_json(path, category, truncated, format, quiet, out)?);
+                results.push(category_to_json(
+                    path, category, truncated, format, quiet, out,
+                )?);
             }
             if format == OutputFormat::Json {
                 let mut arr = serde_json::Map::new();
@@ -709,7 +711,7 @@ fn classify(buf: &[u8]) -> SniffCategory {
                 if let Ok(geo) = tpt_geo_geojson::parse(trimmed) {
                     return SniffCategory::GeoJson(geo);
                 }
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
                     return SniffCategory::Json(value);
                 }
             }
@@ -775,7 +777,7 @@ fn router_envelope(path: &str) -> Result<String, String> {
     obj.insert("source".into(), serde_json::Value::String(path.to_string()));
     obj.insert(
         "bytes".into(),
-            serde_json::Value::Number((bytes.len() as u64).into()),
+        serde_json::Value::Number((bytes.len() as u64).into()),
     );
 
     // Run MIME detection first (on raw bytes); only fall through to text
@@ -837,7 +839,10 @@ fn dispatch_text(
             tpt_geo_geojson::GeoJson::Feature(_) => 1,
             _ => 0,
         };
-        extra.insert("features".into(), serde_json::Value::Number(features.into()));
+        extra.insert(
+            "features".into(),
+            serde_json::Value::Number(features.into()),
+        );
         return (
             Some("application/geo+json".to_string()),
             "geojson".to_string(),
@@ -864,7 +869,12 @@ fn dispatch_text(
 
     let all_json = non_empty.iter().all(|l| {
         serde_json::from_str::<serde_json::Value>(l)
-            .map(|v| matches!(v, serde_json::Value::Object(_) | serde_json::Value::Array(_)))
+            .map(|v| {
+                matches!(
+                    v,
+                    serde_json::Value::Object(_) | serde_json::Value::Array(_)
+                )
+            })
             .unwrap_or(false)
     });
     if all_json {
@@ -1013,7 +1023,10 @@ fn explain_output(
     let tz_offset = |utc: DateTime<Utc>| -> String {
         match &tz {
             TzSpec::Utc => "+00:00".to_string(),
-            TzSpec::Local => Local.from_utc_datetime(&utc.naive_utc()).offset().to_string(),
+            TzSpec::Local => Local
+                .from_utc_datetime(&utc.naive_utc())
+                .offset()
+                .to_string(),
             TzSpec::Offset(f) => f.to_string(),
         }
     };
@@ -1047,8 +1060,14 @@ fn explain_output(
             let mut t = serde_json::Map::new();
             t.insert("after".into(), serde_json::Value::String(a.to_rfc3339()));
             t.insert("before".into(), serde_json::Value::String(b.to_rfc3339()));
-            t.insert("from_offset".into(), serde_json::Value::String(offsets[i].clone()));
-            t.insert("to_offset".into(), serde_json::Value::String(offsets[i + 1].clone()));
+            t.insert(
+                "from_offset".into(),
+                serde_json::Value::String(offsets[i].clone()),
+            );
+            t.insert(
+                "to_offset".into(),
+                serde_json::Value::String(offsets[i + 1].clone()),
+            );
             dst.push(serde_json::Value::Object(t));
         }
     }
@@ -1061,7 +1080,10 @@ fn explain_output(
     if format == OutputFormat::Json {
         let mut obj = serde_json::Map::new();
         obj.insert("ok".into(), serde_json::Value::Bool(true));
-        obj.insert("expression".into(), serde_json::Value::String(expr.to_string()));
+        obj.insert(
+            "expression".into(),
+            serde_json::Value::String(expr.to_string()),
+        );
         obj.insert("human".into(), serde_json::Value::String(human.clone()));
         obj.insert("fields".into(), serde_json::Value::Object(fields));
         obj.insert("next_runs".into(), serde_json::Value::Array(runs_json));
@@ -1167,8 +1189,14 @@ fn jsonl_stats(
         let mut obj = serde_json::Map::new();
         obj.insert("ok".into(), serde_json::Value::Bool(true));
         obj.insert("path".into(), serde_json::Value::String(path.clone()));
-        obj.insert("bytes".into(), serde_json::Value::Number(bytes.len().into()));
-        obj.insert("elapsed_ms".into(), serde_json::Value::Number((elapsed.as_millis() as u64).into()));
+        obj.insert(
+            "bytes".into(),
+            serde_json::Value::Number(bytes.len().into()),
+        );
+        obj.insert(
+            "elapsed_ms".into(),
+            serde_json::Value::Number((elapsed.as_millis() as u64).into()),
+        );
         obj.insert(
             "mb_per_s".into(),
             serde_json::Value::Number(
@@ -1187,13 +1215,13 @@ fn jsonl_stats(
             ),
         );
         obj.insert("fields".into(), serde_json::Value::Object(field_json));
-    last = emit_json_or(
-        out,
-        format,
-        serde_json::Value::Object(obj),
-        || {
-            format!(
-                "{}: {} records, {} errors, {:.2} MB/s, {} fields",
+        last = emit_json_or(
+            out,
+            format,
+            serde_json::Value::Object(obj),
+            || {
+                format!(
+                    "{}: {} records, {} errors, {:.2} MB/s, {} fields",
                     path,
                     records,
                     errors,
@@ -1271,8 +1299,14 @@ fn logfmt_stats(
 
     let mut obj = serde_json::Map::new();
     obj.insert("ok".into(), serde_json::Value::Bool(true));
-    obj.insert("bytes".into(), serde_json::Value::Number(bytes.len().into()));
-    obj.insert("elapsed_ms".into(), serde_json::Value::Number((elapsed.as_millis() as u64).into()));
+    obj.insert(
+        "bytes".into(),
+        serde_json::Value::Number(bytes.len().into()),
+    );
+    obj.insert(
+        "elapsed_ms".into(),
+        serde_json::Value::Number((elapsed.as_millis() as u64).into()),
+    );
     obj.insert(
         "mb_per_s".into(),
         serde_json::Value::Number(
@@ -1324,42 +1358,40 @@ fn watch_jsonl(
     if path == "-" {
         return Err("watch mode requires a file path, not stdin".into());
     }
-    {
-        let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
-        file.seek(std::io::SeekFrom::End(0)).map_err(|e| e.to_string())?;
-        let mut reader = BufReader::new(file);
-        let mut buf = String::new();
-        loop {
-            buf.clear();
-            match reader.read_line(&mut buf) {
-                Ok(0) => {
-                    std::thread::sleep(std::time::Duration::from_millis(200));
-                }
-                Ok(_) => {
-                    let trimmed = buf.trim();
-                    if trimmed.is_empty() {
-                        continue;
-                    }
-                    match serde_json::from_str::<serde_json::Value>(trimmed) {
-                        Ok(v) => {
-                            let obj = || {
-                                let mut o = serde_json::Map::new();
-                                o.insert("ok".into(), serde_json::Value::Bool(true));
-                                o.insert("path".into(), serde_json::Value::String(path.clone()));
-                                o.insert("record".into(), v);
-                                serde_json::Value::Object(o)
-                            };
-                            let human = || trimmed.to_string();
-                            emit_json_or(out, format, obj(), human, quiet)?;
-                        }
-                        Err(e) => {
-                            emit_err(format, &format!("{}: parse error: {e}", path));
-                        }
-                    }
-                }
-                Err(e) => return Err(e.to_string()),
+    let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    file.seek(std::io::SeekFrom::End(0))
+        .map_err(|e| e.to_string())?;
+    let mut reader = BufReader::new(file);
+    let mut buf = String::new();
+    loop {
+        buf.clear();
+        match reader.read_line(&mut buf) {
+            Ok(0) => {
+                std::thread::sleep(std::time::Duration::from_millis(200));
             }
+            Ok(_) => {
+                let trimmed = buf.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                match serde_json::from_str::<serde_json::Value>(trimmed) {
+                    Ok(v) => {
+                        let obj = || {
+                            let mut o = serde_json::Map::new();
+                            o.insert("ok".into(), serde_json::Value::Bool(true));
+                            o.insert("path".into(), serde_json::Value::String(path.clone()));
+                            o.insert("record".into(), v);
+                            serde_json::Value::Object(o)
+                        };
+                        let human = || trimmed.to_string();
+                        emit_json_or(out, format, obj(), human, quiet)?;
+                    }
+                    Err(e) => {
+                        emit_err(format, &format!("{}: parse error: {e}", path));
+                    }
+                }
+            }
+            Err(e) => return Err(e.to_string()),
         }
     }
-    Ok(())
 }

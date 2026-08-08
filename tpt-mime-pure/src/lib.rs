@@ -1619,7 +1619,9 @@ mod tests {
             Some((MimeType::Png, Confidence::High))
         );
         assert_eq!(
-            detect_with_confidence(&[0x1A, 0x45, 0xDF, 0xA3, 0x8B, 0x42, 0x82, 0x84, b'w', b'e', b'b', b'm']),
+            detect_with_confidence(&[
+                0x1A, 0x45, 0xDF, 0xA3, 0x8B, 0x42, 0x82, 0x84, b'w', b'e', b'b', b'm'
+            ]),
             Some((MimeType::WebM, Confidence::High))
         );
         // 2-byte signatures are Low (frequent false positives).
@@ -1646,6 +1648,7 @@ mod tests {
         assert!(Confidence::Low < Confidence::High);
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn detect_all_with_confidence_agrees_with_detect_all() {
         let all: Vec<(MimeType, Confidence)> =
@@ -1655,11 +1658,13 @@ mod tests {
         let mut bytes = [0u8; 512];
         bytes[..2].copy_from_slice(b"BM");
         bytes[257..262].copy_from_slice(b"ustar");
-        let all: Vec<(MimeType, Confidence)> =
-            detect_all_with_confidence(&bytes).collect();
+        let all: Vec<(MimeType, Confidence)> = detect_all_with_confidence(&bytes).collect();
         assert_eq!(
             all,
-            vec![(MimeType::Tar, Confidence::High), (MimeType::Bmp, Confidence::Low)]
+            vec![
+                (MimeType::Tar, Confidence::High),
+                (MimeType::Bmp, Confidence::Low)
+            ]
         );
     }
 }

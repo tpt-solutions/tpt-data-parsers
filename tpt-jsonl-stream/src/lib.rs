@@ -693,10 +693,12 @@ pub fn parse_jsonl_parallel<R: std::io::Read>(
     let mut full = Vec::new();
     match reader.read_to_end(&mut full) {
         Ok(_) => {}
-        Err(e) => return vec![Err(JsonlError {
-            line: 0,
-            kind: JsonlErrorKind::Io(e),
-        })],
+        Err(e) => {
+            return vec![Err(JsonlError {
+                line: 0,
+                kind: JsonlErrorKind::Io(e),
+            })]
+        }
     }
 
     // Split into non-blank lines, mirroring the sync reader's rules.
@@ -727,11 +729,10 @@ pub fn parse_jsonl_parallel<R: std::io::Read>(
                 });
             }
             let mut buf = content.clone();
-            parse_line(&mut buf)
-                .map_err(|e| JsonlError {
-                    line: *line,
-                    kind: JsonlErrorKind::Json(e),
-                })
+            parse_line(&mut buf).map_err(|e| JsonlError {
+                line: *line,
+                kind: JsonlErrorKind::Json(e),
+            })
         })
         .collect()
 }
@@ -1173,8 +1174,7 @@ mod tests {
         let data = b"{\"x\":1}\n\n{\"x\":2}\n{\"x\":3}\n";
         let values = parse_jsonl_parallel(BufReader::new(data.as_slice()));
         assert_eq!(values.len(), 3);
-        let values: Vec<serde_json::Value> =
-            values.into_iter().collect::<Result<_, _>>().unwrap();
+        let values: Vec<serde_json::Value> = values.into_iter().collect::<Result<_, _>>().unwrap();
         assert_eq!(values[0]["x"], 1);
         assert_eq!(values[2]["x"], 3);
     }
