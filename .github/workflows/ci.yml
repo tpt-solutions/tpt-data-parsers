@@ -91,8 +91,12 @@ jobs:
         env:
           RUSTDOCFLAGS: "-D warnings"
 
+  # Advisory, not a hard gate. Every crate here is still pre-1.0 (0.x), so routine
+  # API changes are expected between releases and `cargo semver-checks` would flag
+  # them as "breaking" under strict semver. The definitive check runs in
+  # `publish.yml`, gating the actual release. Keep this as a non-blocking signal.
   semver:
-    name: Semver checks
+    name: Semver checks (advisory)
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
@@ -116,8 +120,10 @@ jobs:
       - name: build tpt-mime-pure (no_std, bare-metal target)
         run: cargo build -p tpt-mime-pure --no-default-features --target thumbv7em-none-eabi
 
+  # Best-effort only: requires the nightly toolchain and a one-off `cargo-fuzz`
+  # install, and fuzzing is inherently a long-running effort rather than a CI gate.
   fuzz:
-    name: Fuzz targets (nightly)
+    name: Fuzz targets (nightly, best-effort)
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:

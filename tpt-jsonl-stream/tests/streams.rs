@@ -93,3 +93,42 @@ fn integration_non_breaking_space_line_is_not_skipped() {
     assert_eq!(results[1].as_ref().unwrap_err().line, 2);
     assert!(results[2].is_ok());
 }
+
+/// A reader that always fails with a persistent I/O error must terminate, not
+/// yield errors forever (regression for the infinite-loop-on-IO-error bug).
+#[test]
+fn integration_persistent_io_error_terminates() {
+    use std::io::{Error, ErrorKind, Read};
+
+    struct AlwaysFails;
+    impl Read for AlwaysFails {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Err(Error::new(ErrorKind::Other, "boom"))
+        }
+    }
+    impl std::io::BufRead for AlwaysFails {
+        fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+            Err(Error::new(ErrorKind::Other, "boom"))
+        }
+        fn consume(&mut self, _: usize) {}
+    }
+
+    let count = parse_jsonl(AlwaysFails).take(5000).count();
+    assert_eq!(count, 1, "reader must stop after the first I/O error");
+}
+
+/// Deeply nested JSON must be rejected with an error, never crash on a stack
+/// overflow. Defense-in-depth for both the default `serde_json` path (which is
+/// itself bounded at depth 128) and the `simd` path (which is not bounded by
+/// `simd_json` and would otherwise overflow the stack).
+#[test]
+fn integration_deep_nesting_is_rejected() {
+    let n = 5000usize;
+    let line = format!("{}{}\n", "[".repeat(n), "]".repeat(n));
+    let mut reader = parse_jsonl(BufReader::new(line.as_bytes()));
+    let err = reader
+        .next()
+        .expect("must yield exactly one result")
+        .unwrap_err();
+    assert!(matches!(err.kind, JsonlErrorKind::Json(_)));
+}

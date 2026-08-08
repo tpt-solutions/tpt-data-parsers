@@ -12,6 +12,7 @@ use std::io::Read;
 
 /// The kind of validation or parse error.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum GeoErrorKind {
     /// The GeoJSON `type` field has an unexpected value.
     InvalidType(String),
@@ -211,6 +212,10 @@ impl Geometry {
     /// Returns `None` when the geometry contains no positions at all (for example an
     /// empty `MultiPoint` or an empty `GeometryCollection`).
     ///
+    /// This is a simple min/max over the positions and is **not** antimeridian-aware:
+    /// a geometry that crosses the 180° meridian (e.g. spanning longitudes 170° and
+    /// -170°) yields a bounding box nearly 340° wide rather than the ~20° span.
+    ///
     /// # Example
     ///
     /// ```
@@ -375,7 +380,11 @@ impl Serialize for Feature {
         let mut state = serializer.serialize_map(None)?;
         state.serialize_entry("type", "Feature")?;
         state.serialize_entry("geometry", &self.geometry)?;
-        state.serialize_entry("properties", &self.properties)?;
+        // `None` means `properties` was absent on input and must be omitted
+        // (not emitted as `null`) so that round-trips are exactly equal.
+        if let Some(properties) = &self.properties {
+            state.serialize_entry("properties", properties)?;
+        }
         if let Some(id) = &self.id {
             state.serialize_entry("id", id)?;
         }
@@ -579,6 +588,7 @@ pub fn parse_reader<R: Read>(mut reader: R) -> Result<GeoJson, GeoError> {
 /// assert!(json.contains("\"type\":\"Point\""));
 /// ```
 pub fn to_json(value: &GeoJson) -> Result<String, GeoError> {
+    value.validate()?;
     serde_json::to_string(value).map_err(|e| GeoError {
         kind: GeoErrorKind::Json(e),
         path: String::new(),
@@ -597,6 +607,18 @@ fn child(path: &str, member: &str) -> String {
 
 fn index(path: &str, i: usize) -> String {
     format!("{}[{}]", path, i)
+}
+
+/// A short, stable name for a JSON value's type, used in error messages.
+fn json_type_name(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
 }
 
 /// Extract the optional `bbox` array and any non-standard members from `v`,
@@ -706,7 +728,24 @@ fn parse_feature(v: &Value, path: &str) -> Result<Feature, GeoError> {
         Some(geom_val) => Some(parse_geometry(geom_val, &child(path, "geometry"))?),
     };
 
-    let properties = v.get("properties").cloned();
+    // RFC 7946 §3.2: `properties` is an object or `null`. It is optional; when
+    // absent we keep `None` (distinct from `Some(Null)`) so a parse → serialize →
+    // parse round-trip is exactly equal. Any other JSON type is rejected.
+    let properties_path = child(path, "properties");
+    let properties = match v.get("properties") {
+        None => None,
+        Some(Value::Null) => Some(Value::Null),
+        Some(Value::Object(obj)) => Some(Value::Object(obj.clone())),
+        Some(other) => {
+            return Err(GeoError {
+                kind: GeoErrorKind::InvalidType(format!(
+                    "properties must be an object or null, got {}",
+                    json_type_name(other)
+                )),
+                path: properties_path,
+            })
+        }
+    };
     let id = v.get("id").cloned();
     let (bbox, foreign_members) =
         collect_extra(v, &["type", "geometry", "properties", "id", "bbox"], path)?;
@@ -730,25 +769,33 @@ fn parse_geometry(v: &Value, path: &str) -> Result<Geometry, GeoError> {
         })?;
 
     let coords_path = child(path, "coordinates");
-    match type_str {
+    let geometry = match type_str {
         "Point" => {
             let raw = coords_raw(v, &coords_path)?;
             let pos = parse_position(raw, &coords_path)?;
-            Ok(Geometry::Point { coordinates: pos })
+            Geometry::Point { coordinates: pos }
         }
         "MultiPoint" => {
             let arr = coords_raw(v, &coords_path)?;
             let positions = parse_position_array(arr, &coords_path)?;
-            Ok(Geometry::MultiPoint {
+            Geometry::MultiPoint {
                 coordinates: positions,
-            })
+            }
         }
         "LineString" => {
             let arr = coords_raw(v, &coords_path)?;
             let positions = parse_position_array(arr, &coords_path)?;
-            Ok(Geometry::LineString {
+            if positions.len() < 2 {
+                return Err(GeoError {
+                    kind: GeoErrorKind::InvalidRing(
+                        "LineString must have at least 2 positions".into(),
+                    ),
+                    path: coords_path.clone(),
+                });
+            }
+            Geometry::LineString {
                 coordinates: positions,
-            })
+            }
         }
         "MultiLineString" => {
             let arr = coords_raw(v, &coords_path)?
@@ -761,13 +808,22 @@ fn parse_geometry(v: &Value, path: &str) -> Result<Geometry, GeoError> {
                 })?;
             let mut lines = Vec::with_capacity(arr.len());
             for (i, line_val) in arr.iter().enumerate() {
-                lines.push(parse_position_array(line_val, &index(&coords_path, i))?);
+                let positions = parse_position_array(line_val, &index(&coords_path, i))?;
+                if positions.len() < 2 {
+                    return Err(GeoError {
+                        kind: GeoErrorKind::InvalidRing(
+                            "LineString must have at least 2 positions".into(),
+                        ),
+                        path: coords_path.clone(),
+                    });
+                }
+                lines.push(positions);
             }
-            Ok(Geometry::MultiLineString { coordinates: lines })
+            Geometry::MultiLineString { coordinates: lines }
         }
         "Polygon" => {
             let rings = parse_rings(v, &coords_path)?;
-            Ok(Geometry::Polygon { coordinates: rings })
+            Geometry::Polygon { coordinates: rings }
         }
         "MultiPolygon" => {
             let arr = coords_raw(v, &coords_path)?
@@ -780,7 +836,7 @@ fn parse_geometry(v: &Value, path: &str) -> Result<Geometry, GeoError> {
             for (i, poly_val) in arr.iter().enumerate() {
                 polys.push(parse_rings_value(poly_val, &index(&coords_path, i))?);
             }
-            Ok(Geometry::MultiPolygon { coordinates: polys })
+            Geometry::MultiPolygon { coordinates: polys }
         }
         "GeometryCollection" => {
             let geoms_val = v
@@ -797,13 +853,28 @@ fn parse_geometry(v: &Value, path: &str) -> Result<Geometry, GeoError> {
             for (i, gv) in geoms_val.iter().enumerate() {
                 geoms.push(parse_geometry(gv, &index(&geoms_path, i))?);
             }
-            Ok(Geometry::GeometryCollection { geometries: geoms })
+            Geometry::GeometryCollection { geometries: geoms }
         }
-        other => Err(GeoError {
-            kind: GeoErrorKind::InvalidType(format!("unknown geometry type '{}'", other)),
-            path: child(path, "type"),
-        }),
-    }
+        other => {
+            return Err(GeoError {
+                kind: GeoErrorKind::InvalidType(format!("unknown geometry type '{}'", other)),
+                path: child(path, "type"),
+            });
+        }
+    };
+
+    // A nested geometry (a child of a GeometryCollection, or the geometry of a
+    // Feature) may carry its own `bbox` and foreign members. We validate the
+    // `bbox` here so a malformed one is rejected exactly as it is at the top
+    // level. Foreign members on a nested geometry are not preserved by the data
+    // model — only top-level objects get a `GeometryObject`/feature wrapper that
+    // can hold them (documented at [`GeometryObject`]).
+    let known: &[&str] = match type_str {
+        "GeometryCollection" => &["type", "geometries", "bbox"],
+        _ => &["type", "coordinates", "bbox"],
+    };
+    let _ = collect_extra(v, known, path)?;
+    Ok(geometry)
 }
 
 fn coords_raw<'a>(v: &'a Value, path: &str) -> Result<&'a Value, GeoError> {
@@ -939,6 +1010,24 @@ fn validate_ring(ring: &[Position], path: &str) -> Result<(), GeoError> {
     Ok(())
 }
 
+/// Validate a single line of a (Multi)LineString. RFC 7946 §3.1.4 requires at
+/// least two positions, so a line with zero or one position is rejected.
+fn validate_linestring_line(line: &[Position], path: &str) -> Result<(), GeoError> {
+    for (i, p) in line.iter().enumerate() {
+        validate_position(p, &index(path, i))?;
+    }
+    if line.len() < 2 {
+        return Err(GeoError {
+            kind: GeoErrorKind::InvalidRing(format!(
+                "LineString must have at least 2 positions, got {}",
+                line.len()
+            )),
+            path: path.to_owned(),
+        });
+    }
+    Ok(())
+}
+
 fn validate_bbox_values(vals: &[f64], path: &str) -> Result<(), GeoError> {
     if vals.len() != 4 && vals.len() != 6 {
         return Err(GeoError {
@@ -973,6 +1062,33 @@ fn validate_bbox_values(vals: &[f64], path: &str) -> Result<(), GeoError> {
             });
         }
     }
+    // Reject an inverted latitude (south > north). The west/east ordering is
+    // deliberately *not* enforced so that antimeridian-crossing bboxes (where
+    // west > east, e.g. `[170,-10,-170,10]`) remain representable.
+    let (south, north) = (vals[1], vals[1 + half]);
+    if south > north {
+        return Err(GeoError {
+            kind: GeoErrorKind::MalformedCoordinates(format!(
+                "bbox latitude is inverted: south {} is greater than north {}",
+                south, north
+            )),
+            path: path.to_owned(),
+        });
+    }
+    if let (Some(min_alt), Some(max_alt)) = (
+        vals.get(2).copied().filter(|_| half == 3),
+        vals.get(5).copied().filter(|_| half == 3),
+    ) {
+        if min_alt > max_alt {
+            return Err(GeoError {
+                kind: GeoErrorKind::MalformedCoordinates(format!(
+                    "bbox altitude is inverted: {} is greater than {}",
+                    min_alt, max_alt
+                )),
+                path: path.to_owned(),
+            });
+        }
+    }
     Ok(())
 }
 
@@ -987,18 +1103,16 @@ fn validate_geometry_at(g: &Geometry, path: &str) -> Result<(), GeoError> {
     let coords_path = child(path, "coordinates");
     match g {
         Geometry::Point { coordinates } => validate_position(coordinates, &coords_path),
-        Geometry::MultiPoint { coordinates } | Geometry::LineString { coordinates } => {
+        Geometry::MultiPoint { coordinates } => {
             for (i, p) in coordinates.iter().enumerate() {
                 validate_position(p, &index(&coords_path, i))?;
             }
             Ok(())
         }
+        Geometry::LineString { coordinates } => validate_linestring_line(coordinates, &coords_path),
         Geometry::MultiLineString { coordinates } => {
             for (i, line) in coordinates.iter().enumerate() {
-                let lp = index(&coords_path, i);
-                for (j, p) in line.iter().enumerate() {
-                    validate_position(p, &index(&lp, j))?;
-                }
+                validate_linestring_line(line, &index(&coords_path, i))?;
             }
             Ok(())
         }
@@ -1261,5 +1375,88 @@ mod tests {
         let s = r#"{"type":"FeatureCollection","bbox":"bad","features":[]}"#;
         let err = parse(s).unwrap_err();
         assert!(matches!(err.kind, GeoErrorKind::MalformedCoordinates(_)));
+    }
+
+    #[test]
+    fn degenerate_linestring_rejected() {
+        // RFC 7946 §3.1.4: a LineString needs at least two positions.
+        let err = parse(r#"{"type":"LineString","coordinates":[]}"#).unwrap_err();
+        assert!(matches!(err.kind, GeoErrorKind::InvalidRing(_)));
+        let err = parse(r#"{"type":"LineString","coordinates":[[0,0]]}"#).unwrap_err();
+        assert!(matches!(err.kind, GeoErrorKind::InvalidRing(_)));
+        let err = parse(r#"{"type":"MultiLineString","coordinates":[[[0,0]]]}"#).unwrap_err();
+        assert!(matches!(err.kind, GeoErrorKind::InvalidRing(_)));
+        // Two positions is fine.
+        assert!(parse(r#"{"type":"LineString","coordinates":[[0,0],[1,1]]}"#).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_degenerate_linestring() {
+        let g = Geometry::LineString {
+            coordinates: vec![Position::new(vec![0.0, 0.0]).unwrap()],
+        };
+        assert!(g.validate().is_err());
+    }
+
+    #[test]
+    fn properties_absent_round_trips_without_null() {
+        // Absent `properties` must serialize to *no* member, not `"properties":null`,
+        // so that parse → serialize → parse is exactly equal.
+        let s = r#"{"type":"Feature","geometry":{"type":"Point","coordinates":[0,0]}}"#;
+        let geo = parse(s).unwrap();
+        let json = to_json(&geo).unwrap();
+        assert!(!json.contains("properties"));
+        assert_eq!(parse(&json).unwrap(), geo);
+    }
+
+    #[test]
+    fn properties_must_be_object_or_null() {
+        let err = parse(
+            r#"{"type":"Feature","properties":42,"geometry":{"type":"Point","coordinates":[0,0]}}"#,
+        )
+        .unwrap_err();
+        assert!(matches!(err.kind, GeoErrorKind::InvalidType(_)));
+        let err = parse(
+            r#"{"type":"Feature","properties":"x","geometry":{"type":"Point","coordinates":[0,0]}}"#,
+        )
+        .unwrap_err();
+        assert!(matches!(err.kind, GeoErrorKind::InvalidType(_)));
+        // `null` and an object are accepted and preserved.
+        let ok = parse(
+            r#"{"type":"Feature","properties":null,"geometry":{"type":"Point","coordinates":[0,0]}}"#,
+        )
+        .unwrap();
+        let json = to_json(&ok).unwrap();
+        assert!(json.contains(r#""properties":null"#));
+    }
+
+    #[test]
+    fn nested_geometry_bbox_is_validated() {
+        // A malformed bbox on a nested geometry (here the `geometry` of a Feature,
+        // but not a top-level object) must be rejected, not silently accepted.
+        let s = r#"{"type":"Feature","geometry":{"type":"Point","coordinates":[0,0],"bbox":[0,10,10,0]},"properties":null}"#;
+        let err = parse(s).unwrap_err();
+        assert!(matches!(err.kind, GeoErrorKind::MalformedCoordinates(_)));
+    }
+
+    #[test]
+    fn inverted_bbox_rejected() {
+        let s = r#"{"type":"FeatureCollection","bbox":[0,10,10,0],"features":[]}"#;
+        let err = parse(s).unwrap_err();
+        assert!(matches!(err.kind, GeoErrorKind::MalformedCoordinates(_)));
+        // Antimeridian crossing (west > east) stays allowed.
+        assert!(
+            parse(r#"{"type":"FeatureCollection","bbox":[170,-10,-170,10],"features":[]}"#).is_ok()
+        );
+    }
+
+    #[test]
+    fn to_json_rejects_invalid_values() {
+        // NaN coordinates are rejected by `validate`, so `to_json` must not emit
+        // `"coordinates":[null,null]` for them.
+        let geo = GeoJson::Geometry(Geometry::Point {
+            coordinates: Position::new(vec![f64::NAN, 0.0]).unwrap(),
+        });
+        assert!(to_json(&geo).is_err());
     }
 }

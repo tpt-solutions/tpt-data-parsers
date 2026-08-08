@@ -105,7 +105,6 @@
 
 ## Phase 8: Git/repo reconciliation
 - [x] Review/merge remote PR #1 (`origin/claude/crates-io-readiness-ljshrm`) containing `hygiene.yml` and a repo-URL fix before pushing local `master`
-- [x] Remove duplicate tracked file `TODO 1260715.md`
 - [x] Delete or move stale `spec.txt` (superseded by README docs) into `docs/`
 
 ## Phase 9: Adoption & usability improvements
@@ -166,7 +165,6 @@
 - [x] `tpt-cron-parse`: add per-field range validation — `parse_u8`/`parse_item` (`src/lib.rs:332-413`) accept any `u8` (0-255) with no bounds check, so e.g. `"0 99 * * *"` parses successfully; `to_human_readable()` then prints nonsense, and under the `chrono` feature `next_after`/`upcoming` silently run their full bounded ~4-year/2.1M-minute search (the search itself is correctly bounded, not infinite — but a malformed field should fail fast with a `CronError` instead of paying that cost). No existing test covers rejection of out-of-range field values.
 - [x] `tpt-geo-geojson`: `bbox` on a bare top-level `Geometry` (not wrapped in a `Feature`/`FeatureCollection`) is silently discarded — `parse_geometry` never calls `collect_extra`, so `to_json` won't reproduce it. RFC 7946 permits `bbox` on any GeoJSON object; today only Feature/FeatureCollection round-trip it.
 - [x] Backfill `CHANGELOG.md` entries — `write_logfmt`, `CronExpr::upcoming`, and the new mime signatures (Zstd/XZ/WOFF/WOFF2/JavaClass) shipped but have zero mentions in any crate's `CHANGELOG.md` (all stop at `[0.2.0]`), despite `TODO.md` Phase 14 labeling them "v0.3.0 feature candidates."
-- [x] Remove tracked duplicate file `TODO 1260713.md` at repo root (a second stray auto-numbered copy, same class of issue as the `TODO 1260715.md` already cleaned up in Phase 8).
 
 ## Phase 18: CI & supply-chain automation
 - [x] Add a `cargo-deny` or `cargo-audit` CI job — nothing today checks for vulnerable dependencies or license drift; `hygiene.yml` only checks commit metadata, not supply-chain health.
@@ -245,3 +243,71 @@
 
 ## Phase 21b: Corrections to earlier TODO entries (2026-08-08 audit)
 - [x] **Re-verify before acting — my prior correction below was wrong; the Phase 17 Zstandard bullet is CORRECT.** `tpt-mime-pure/src/lib.rs:330-333` uses `starts_with!([0x28, 0x4D, 0x18, 0x09])`. The canonical zstd frame magic (32-bit `0xFD2FB528`) is written little-endian on disk as bytes `28 B5 2F FD`, **not** `28 4D 18 09`. So real `.zst` files ARE misdetected → the original Phase 17 item stands and should be fixed (`28 B5 2F FD`). The byte claim in Phase 17 is accurate; do not strike it.
+
+## Phase 22: 2026-08-08 platform audit — VERIFIED BUGS (empirically reproduced)
+> Findings below were each reproduced by running scratch harnesses / the built CLI;
+> the checkbox only goes `[x]` once a regression test exists that fails before and
+> passes after (this is what kept earlier phases from regressing).
+
+### CRITICAL
+- [x] `tpt-jsonl-stream`: `simd` feature stack-overflows on deeply nested JSON (~4 KB input at depth ~2000; default path safely caps at depth 128). Add a cheap depth pre-scan rejecting depth beyond 128 with `serde_json::Error` so both feature paths behave identically; add a `--features simd` regression test.
+- [x] `tpt-jsonl-stream`: `JsonlReader::next` loops forever on a persistent I/O error (reproduced: 2000/2000 items). Add a `done` latch set on `Eof`/`Io`; return `None` afterwards; `impl FusedIterator`. Do the same for `AsyncJsonlReader`.
+- [x] `tpt-cli`: 6-field `cron --next` returns a time **in the past** (`with_second(0)` truncation at `main.rs` resets the library's seconds floor). Remove the truncation so `next_after` handles seconds.
+
+### HIGH
+- [x] `tpt-cli`: `cron --next --timezone` ignores the timezone for schedule evaluation (only re-renders UTC as the zone). Wire `next_after_tz` (the library API already exists).
+- [x] `tpt-cron-parse`: `to_human_readable()` silently drops the seconds field — `*/10 * * * * *`/`* * * * * *`/`30 0 9 * * *`/`0 0 9 * * *` all collapse. Thread `seconds` through; append `:SS` / "Every N seconds".
+- [x] `tpt-cron-parse`: `to_human_readable()` fallback is gibberish for common exprs (`0 9 * * 1-5` → `"At 0 past 9 on * of * (1-5)"`; `"Every 1 minutes"`). Handle `Range`/`List`/DOW and an "every N hours" case; make the fallback grammatical. (`0 9 * * 1-5` is the README/example's own expression.)
+- [x] `tpt-cli`: `--json` / `--format json` emits non-JSON on every error path (stderr text, exit 1). Thread `format` out of `run` and emit `{"error":..,"kind":..}` JSON on failure too; add `"ok"` to success payloads.
+- [x] `tpt-cli`: `sniff` only runs MIME detection on *invalid* UTF-8 (reverse of its README); ASCII-clean tar → `unknown`. Run `detect()` unconditionally first; only fall through to text classification when it returns `None`/text-ambiguous.
+- [x] `tpt-logfmt-parse`: escape set diverges from `go-logfmt` both ways — `\uXXXX`/`\b`/`\f`/`\/` are silently mis-decoded (passed through with backslashes, no error), and the writer emits `\xNN` (which go-logfmt rejects). Decode `\uXXXX`(+surrogates)/`\b`/`\f`/`\/`; encode control bytes as `\u00XX`. Decide/document unknown-escape policy.
+- [x] `tpt-geo-geojson`: degenerate `LineString: []` / `[[0,0]]` accepted (RFC 7946 §3.1.4). Add a `len < 2` check in `parse` and `validate`.
+- [x] `tpt-geo-geojson`: `properties` absent is conflated with `null` (breaks `parse→to_json→parse` equality) and `properties: 42` is accepted and re-emitted. Require `properties`; accept only object-or-null per RFC 7946 §3.2.
+- [x] `tpt-geo-geojson`: nested-geometry `bbox`/foreign members are silently dropped *and* unvalidated (top-level bbox:"junk" rejected, one level down accepted). Make `collect_extra` run on nested geometries; preserve/validate them, or document the drop.
+- [x] `tpt-mime-pure`: `tar` shadowed by 2-byte offset-0 signatures (`MZ`/`%PDF`/...) — a tar whose first member name is `MZ-report.txt` detects as `application/x-msdownload`. Reorder detection so offset-anchored/longer signatures win, or sort a specificity table.
+
+### MEDIUM
+- [x] `tpt-cron-parse`: `CronField::expand` doesn't normalise DOW `7`→`0` (`*` returns 8 values for 7 days). Document or add a normalisation variant.
+- [x] `tpt-cron-parse`: leap-year search bound is 4 years but must be 8 (2096→2104 gap); `0 0 29 2 *` after 2096-03-01 → `None`. Use `8*366+1`; fix doc/README; ideally return a distinct `SearchLimitExceeded`.
+- [x] `tpt-cron-parse`: DOM/DOW OR-rule diverges from Vixie when a field *starts with `*`* but isn't bare `*` (`0 0 */2 * MON` fires Saturday, should be Monday). Record a `dom_star`/`dow_star` flag at parse time.
+- [x] `tpt-cron-parse`: `*/200 * * * *` accepted → "Every 200 minutes"; no `L`/`W`/`#`/`?` support (document the gap or implement `?`/`L`/`#`). Gap documented in `parse` doc; `?`/`L`/`W`/`#` rejected as parse errors.
+- [x] `tpt-logfmt-parse`: bare value containing `=` is silently truncated and returned `Ok` (`sig=YWJjZA==` → `("sig","YWJjZA")`). Emit an error on `=`/`"` inside an unquoted value and consume the token.
+- [x] `tpt-logfmt-parse`: `LogfmtLinesReader` has no line-length cap (jsonl sibling got one in the same phase). Mirror `with_max_line_length`/`LineTooLong`.
+- [x] `tpt-jsonl-stream`: BOM on the first line makes it always fail. Strip a leading `\u{feff}` on line 0 before parsing.
+- [x] `tpt-geo-geojson`: inverted-latitude bbox accepted (`[0,10,10,0]`); antimeridian bbox spans 358°. Validate `south<=north`; document/guard antimeridian.
+- [x] `tpt-geo-geojson`: `to_json` emits `[null,null]` for NaN coords though `validate()` rejects them. Validate (or `to_json_validated`) before serialising.
+- [x] `tpt-cli`: `logfmt` output order is nondeterministic across runs and drops duplicate keys (uses `HashMap`; `parse_to_pairs` shipped in Phase 20 and is unused here). Switch the human path to `parse_to_pairs`; carry order/duplicates in `SniffCategory::Logfmt`.
+- [x] `tpt-cli`: `sniff` exits **0** on unknown while `mime` exits **1**. Pick one convention and document it.
+- [x] `tpt-cli`: extension fallback fires on files with no extension (`rsplit('.')` on `exe` → `application/x-msdownload` on a 0-byte file). Use `Path::extension()`.
+- [x] `tpt-cli`: `geojson` subcommand reads one syscall per byte (`parse_reader` on an unbuffered reader). Wrap in `BufReader`.
+- [x] `tpt-cli`: `--json` and `--format` silently contradict; `--json` leaks a library impl detail into `--help`. Make `--json` an alias / deprecate.
+- [x] `tpt-cli`: `sniff` silently truncates at 1 MiB → wrong record counts and spurious `unknown`. Stream instead of slurp, drop the trailing partial line, and (if kept) document the cap; set `"truncated": true`.
+- [x] `tpt-mime-pure`: AVIF with `mif1` major brand + `avif` in compatible brands → `image/heif`. Scan the `ftyp` compatible-brands list for a more specific match.
+- [x] `tpt-mime-pure`: MPEG-2.5 Layer III (`FF E3`) undetected; MP3 sync test could mask-test.
+- [x] `tpt-mime-pure`: no text/charset detection at all (html/json/svg/xml/plain → `None`). Add text handling and BOM sniffing.
+- [x] `tpt-mime-pure`: missing common formats (7z, RAR, bzip2, OLE2/legacy Office, Mach-O, TTF/OTF, etc.).
+
+### LOW / DOCS
+- [x] `tpt-cli`: `completions | head` — wire through the `BrokenPipe`-swallowing `emit` (it currently bypasses `emit` and could panic on a closed pipe like the other subcommands did before Phase 19). Add a test.
+- [x] `tpt-cli`: has **no `tests/` and no `CHANGELOG.md`** — add an integration test harness (`assert_cmd`/`std::process::Command`) asserting exit codes, `--json` validity on success *and* failure, stdin `-`, deterministic `logfmt` ordering, and `completions bash | head` not panicking. This is what keeps the findings above fixed. (Added `tpt-cli/tests/cli.rs` with 17 integration tests; batch path mode and `--quiet` also added in the same pass.)
+- [x] Remove stray tracked files still present: `TODO 1260713.md` at repo root and `history/TODO 1260713.md` (both marked removed in Phases 8/17 but still tracked).
+- [x] Fix doc rot (all on publish-facing pages):
+  - [x] root README "zero-allocation parsers" — jsonl allocates a `Value`/record; say "constant-memory streaming" / "amortised line buffering".
+  - [x] root README geojson "line-numbered errors" — `GeoError` carries only `kind`/`path`, no line/column.
+  - [x] jsonl README "AVX2… falls back at compile time" — simd-json uses runtime dispatch.
+  - [x] jsonl README "parsed in place, no per-line copy" — `simd_json::from_slice` allocates per call; benchmark before publishing the claim.
+  - [x] `docs/spec.txt` "3x speedups" — unsubstantiated; remove (matches README cleanup).
+  - [x] mime README "no_std (with alloc)" — never allocates; drop the parenthetical.
+- [x] CI: `semver` and `fuzz` jobs are `continue-on-error: true` → decorative. Make them required (or document the risk). Extend fuzz targets to the Phase 20–21 APIs (`validate`, `to_json`, `bounding_box`, `contains`, `into_typed`, writers, and the `simd` path where the overflow lives) with a `parse→to_json→parse` equality assertion.
+- [x] `tpt-geo-geojson`: `GeoErrorKind`/`JsonlErrorKind` are not `#[non_exhaustive]`; add before 1.0.
+- [x] `tpt-geo-geojson`: `Geometry::bounding_box` wrong across antimeridian; document or provide an antimeridian-aware variant.
+
+## Phase 23: Innovation & usability backlog (non-blocking, from review)
+- [ ] `tpt sniff` as a streaming router: detect → dispatch → one normalised NDJSON envelope per input (the natural flagship over `file`/`jq`/`mlr`).
+- [ ] `tpt` `--stats` mode: counts, per-line error histogram, MB/s, field cardinality for jsonl/logfmt (turn validators into data-quality tools).
+- [ ] `MimeType` confidence scores (`Confidence::{Low,Medium,High}`) from signature length + anchoring.
+- [ ] Parallel JSONL parsing via `rayon` (beats the `simd` fast path; collected by construction).
+- [ ] jsonl checkpoint/resume (`byte_offset()` + `resume_at`) for multi-GB ingest.
+- [ ] `cron explain --verbose`: next 5 runs, DST transitions crossed, expanded field sets.
+- [ ] Property-based round-trip tests (`proptest`): `write→parse==identity` (logfmt/jsonl); `parse→to_json→parse` (geojson).
+- [ ] `tpt-cli`: batch/multi-path mode + `-r/--recursive`; `--quiet`; TTY color; watch mode; `-o/--output`; stdin for `logfmt` and `cron`.

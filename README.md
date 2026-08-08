@@ -1,7 +1,7 @@
 # tpt-data-parsers
 
-A Rust workspace of ultra-fast, zero-allocation parsers for formats the broader
-ecosystem ignores.
+A Rust workspace of ultra-fast, low-allocation, streaming parsers for formats the
+broader ecosystem ignores.
 
 [![CI](https://github.com/tpt-solutions/tpt-data-parsers/actions/workflows/ci.yml/badge.svg)](https://github.com/tpt-solutions/tpt-data-parsers/actions/workflows/ci.yml)
 
@@ -13,8 +13,8 @@ designed to be dropped into a pipeline, a log shipper, or a constrained
 
 | Crate | Description | crates.io | docs.rs |
 |-------|-------------|-----------|---------|
-| [`tpt-jsonl-stream`](./tpt-jsonl-stream) | Streaming, zero-allocation JSON Lines parser | [![crates.io](https://img.shields.io/crates/v/tpt-jsonl-stream.svg)](https://crates.io/crates/tpt-jsonl-stream) | [![docs.rs](https://docs.rs/tpt-jsonl-stream/badge.svg)](https://docs.rs/tpt-jsonl-stream) |
-| [`tpt-geo-geojson`](./tpt-geo-geojson) | Strict, validating GeoJSON parser with line-numbered errors | [![crates.io](https://img.shields.io/crates/v/tpt-geo-geojson.svg)](https://crates.io/crates/tpt-geo-geojson) | [![docs.rs](https://docs.rs/tpt-geo-geojson/badge.svg)](https://docs.rs/tpt-geo-geojson) |
+| [`tpt-jsonl-stream`](./tpt-jsonl-stream) | Streaming, constant-memory JSON Lines parser | [![crates.io](https://img.shields.io/crates/v/tpt-jsonl-stream.svg)](https://crates.io/crates/tpt-jsonl-stream) | [![docs.rs](https://docs.rs/tpt-jsonl-stream/badge.svg)](https://docs.rs/tpt-jsonl-stream) |
+| [`tpt-geo-geojson`](./tpt-geo-geojson) | Strict, validating GeoJSON parser with path-located errors | [![crates.io](https://img.shields.io/crates/v/tpt-geo-geojson.svg)](https://crates.io/crates/tpt-geo-geojson) | [![docs.rs](https://docs.rs/tpt-geo-geojson/badge.svg)](https://docs.rs/tpt-geo-geojson) |
 | [`tpt-logfmt-parse`](./tpt-logfmt-parse) | Zero-copy logfmt (`key=value`) parser | [![crates.io](https://img.shields.io/crates/v/tpt-logfmt-parse.svg)](https://crates.io/crates/tpt-logfmt-parse) | [![docs.rs](https://docs.rs/tpt-logfmt-parse/badge.svg)](https://docs.rs/tpt-logfmt-parse) |
 | [`tpt-cron-parse`](./tpt-cron-parse) | Cron expression parser with human-readable output | [![crates.io](https://img.shields.io/crates/v/tpt-cron-parse.svg)](https://crates.io/crates/tpt-cron-parse) | [![docs.rs](https://docs.rs/tpt-cron-parse/badge.svg)](https://docs.rs/tpt-cron-parse) |
 | [`tpt-mime-pure`](./tpt-mime-pure) | Pure Rust MIME type detection via magic bytes (`no_std`) | [![crates.io](https://img.shields.io/crates/v/tpt-mime-pure.svg)](https://crates.io/crates/tpt-mime-pure) | [![docs.rs](https://docs.rs/tpt-mime-pure/badge.svg)](https://docs.rs/tpt-mime-pure) |

@@ -3,7 +3,7 @@
 [![docs.rs](https://docs.rs/tpt-jsonl-stream/badge.svg)](https://docs.rs/tpt-jsonl-stream)
 [![crates.io](https://img.shields.io/crates/v/tpt-jsonl-stream.svg)](https://crates.io/crates/tpt-jsonl-stream)
 
-Streaming, zero-allocation JSON Lines (`.jsonl`) parser for Rust.
+Streaming, constant-memory JSON Lines (`.jsonl`) parser for Rust.
 
 AI and data-engineering pipelines use massive JSONL files. Standard parsers load the whole file into RAM. This crate streams line-by-line from any [`BufRead`](https://doc.rust-lang.org/std/io/trait.BufRead.html).
 
@@ -86,9 +86,11 @@ Pass `usize::MAX` for unbounded buffering.
 tpt-jsonl-stream = { version = "0.2", features = ["simd"] }
 ```
 
-Requires an AVX2-capable CPU. Falls back to standard parsing on unsupported hardware at compile time.
-Lines are parsed in place, with no per-line copy. With this feature enabled, a parse
-error carries `simd-json`'s message rather than `serde_json` line/column offsets.
+No special CPU target is required at compile time. `simd_json` selects the best SIMD
+implementation available at runtime, falling back to a portable parser automatically on
+hardware without AVX2.
+Lines are parsed into `simd_json`'s own DOM, which does allocate; benchmark on your
+own data before relying on it for a speedup.
 
 ## Blank lines
 

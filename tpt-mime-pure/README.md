@@ -12,7 +12,7 @@ No OS calls, no shelling out to `file`. Works in minimal Docker containers, WASM
 - **Magic byte detection** — checks the file's leading bytes against known signatures
 - **All matches** — `detect_all` reports every signature that matched, not just the first
 - **Extension fallback** — `detect_by_extension("pdf")` for when you only have a filename
-- **`no_std` compatible** — works without the standard library (with `alloc`); disable the default `std` feature
+- **`no_std` compatible** — works without the standard library; disable the default `std` feature
 - **No dependencies** — zero external crates
 - **~37 common formats** — images, video, audio, archives, documents, binaries
 
@@ -38,7 +38,8 @@ use tpt_mime_pure::{detect_all, MimeType};
 let all: Vec<MimeType> = detect_all(&[0xFF, 0xD8, 0xFF, 0xE0]).collect();
 assert_eq!(all, vec![MimeType::Jpeg]);
 
-assert_eq!(detect_all(b"hello world").next(), None);
+// Plain UTF-8 text with no magic bytes is recognised as `text/plain`.
+assert_eq!(detect_all(b"hello world").next(), Some(MimeType::Text));
 ```
 
 ### Extension fallback

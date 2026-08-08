@@ -1,13 +1,13 @@
 Repo 3: tpt-data-parsers (Niche & High-Performance Parsing)
-Vision: Rust is the king of parsing. This repo provides ultra-fast, zero-allocation parsers for formats that the broader ecosystem ignores.
+Vision: Rust is the king of parsing. This repo provides ultra-fast, low-allocation, streaming parsers for formats that the broader ecosystem ignores.
 Crate 1: tpt-jsonl-stream
-Purpose: A streaming, zero-allocation parser for JSON Lines (.jsonl) files.
+Purpose: A streaming, constant-memory parser for JSON Lines (.jsonl) files.
 Problem Solved: AI and data-engineering pipelines use massive JSONL files. Standard parsers load the whole file into RAM.
-Design Details: Wraps std::io::BufRead. Yields Result<serde_json::Value, Error> line-by-line. Includes an optional simd-json feature flag for 3x speedups on compatible CPUs.
+Design Details: Wraps std::io::BufRead. Yields Result<serde_json::Value, Error> line-by-line. Includes an optional simd-json feature flag for faster parsing on compatible CPUs (benchmark before relying on it).
 Crate 2: tpt-geo-geojson
 Purpose: A strict, fast, and validating GeoJSON parser.
 Problem Solved: The existing geojson crate is good, but often lacks strict validation for malformed GIS data, which causes downstream mapping libraries to panic.
-Design Details: Uses serde for deserialization but adds a secondary validation pass to ensure coordinate arrays are correctly nested and CRS (Coordinate Reference Systems) are valid. Returns highly specific, line-numbered error messages.
+Design Details: Uses serde for deserialization but adds a secondary validation pass to ensure coordinate arrays are correctly nested and CRS (Coordinate Reference Systems) are valid. Returns highly specific, path-located error messages.
 Crate 3: tpt-logfmt-parse
 Purpose: A high-performance parser for logfmt (key=value pair logging).
 Problem Solved: Modern structured logging (like Heroku or Datadog agents) uses logfmt. Rust lacks a dedicated, blazing-fast parser for it.
@@ -19,4 +19,4 @@ Design Details: Parses standard 5-field and 6-field (with seconds) cron syntax. 
 Crate 5: tpt-mime-pure
 Purpose: Pure Rust MIME type detection.
 Problem Solved: Detecting if a file is a PDF, JPEG, or MP4 usually requires shelling out to the OS file command, which fails in minimal Docker containers.
-Design Details: Reads the first 8KB of a file to check "magic bytes" (file signatures). Falls back to extension matching. 100% no_std compatible (with alloc).
+Design Details: Reads the first 8KB of a file to check "magic bytes" (file signatures). Falls back to extension matching. 100% no_std compatible.

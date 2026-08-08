@@ -70,7 +70,7 @@ impl fmt::Display for CronError {
 impl std::error::Error for CronError {}
 
 /// A single cron field value (wildcard, number, range, step, or list).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CronField {
     /// Wildcard `*` — matches all values.
     Any,
@@ -121,6 +121,11 @@ impl CronExpr {
     /// `@monthly`, `@weekly`, `@daily`, `@midnight` and `@hourly` are expanded
     /// before parsing. `@reboot` is not a periodic schedule and is rejected.
     ///
+    /// Vixie-cron extensions `L` (last day of month/week), `W` (nearest weekday),
+    /// `#` (nth weekday) and `?` (unspecified field) are intentionally not
+    /// supported and are rejected as parse errors — this parser only understands
+    /// numeric values, `*`/`-`/`/`/`,` and the named months/days above.
+    ///
     /// # Example
     ///
     /// ```
@@ -166,8 +171,9 @@ impl CronExpr {
     /// Return the first time strictly after `after` that this schedule fires.
     ///
     /// Only available with the `chrono` feature (the crate stays dependency-free
-    /// by default). The search is bounded to roughly four years ahead, the
-    /// maximum period of a cron schedule (due to February 29th).
+    /// by default). The search is bounded to at least 8 years ahead — the
+    /// maximum period of a cron schedule, since 2096 is a leap year and the next
+    /// leap February is 2104, an 8-year gap.
     ///
     /// ```rust,ignore
     /// use tpt_cron_parse::CronExpr;
@@ -225,17 +231,20 @@ impl CronExpr {
         let hours = self.hours.expand(0, 23);
         let doms = self.dom.expand(1, 31);
         let months = self.month.expand(1, 12);
-        let dows = self
-            .dow
-            .expand(0, 7)
-            .into_iter()
-            .map(|d| d % 7)
-            .collect::<Vec<_>>();
-        let dom_restricted = !is_any(&self.dom);
-        let dow_restricted = !is_any(&self.dow);
+        let dows = self.dow.expand(0, 6);
+        // Vixie cron OR-rule: day-of-month and day-of-week are OR-ed only when
+        // *both* are explicitly restricted. A bare `*` or a step on `*` (e.g.
+        // `*/2`) counts as unrestricted ("star"), in which case that field is
+        // AND-ed with the other. This matches `0 0 */2 * MON` firing only on
+        // Mondays, not on every even day too.
+        let dom_unrestricted = field_is_unrestricted(&self.dom);
+        let dow_unrestricted = field_is_unrestricted(&self.dow);
         let start = after.with_nanosecond(0)? + chrono::Duration::seconds(1);
         let first_minute = start.with_second(0)?;
-        let limit = after + chrono::Duration::days(4 * 366 + 1);
+        // The longest possible gap between matching dates is bounded by the
+        // leap-year cycle: 2096 is a leap year and the next leap February is
+        // 2104, an 8-year span, so search at least 8*366+1 days ahead.
+        let limit = after + chrono::Duration::days(8 * 366 + 1);
         let mut cur = first_minute;
 
         while cur <= limit {
@@ -252,11 +261,11 @@ impl CronExpr {
                 chrono::Weekday::Fri => 5,
                 chrono::Weekday::Sat => 6,
             };
-            let day_ok = match (dom_restricted, dow_restricted) {
-                (false, false) => true,
-                (true, false) => doms.contains(&dom),
-                (false, true) => dows.contains(&dow),
-                (true, true) => doms.contains(&dom) || dows.contains(&dow),
+            let day_ok = match (dom_unrestricted, dow_unrestricted) {
+                (true, true) => true,
+                (false, true) => doms.contains(&dom),
+                (true, false) => dows.contains(&dow),
+                (false, false) => doms.contains(&dom) || dows.contains(&dow),
             };
 
             if minutes.contains(&m) && hours.contains(&h) && months.contains(&mon) && day_ok {
@@ -417,7 +426,9 @@ fn field_bounds(field: CronFieldName) -> (u8, u8) {
         CronFieldName::Hours => (0, 23),
         CronFieldName::DayOfMonth => (1, 31),
         CronFieldName::Month => (1, 12),
-        CronFieldName::DayOfWeek => (0, 7),
+        // Day-of-week runs 0-6 (Sun-Sat). `7` is a cron alias for Sunday (`0`)
+        // and is normalised to `0` at parse time, so the upper bound here is 6.
+        CronFieldName::DayOfWeek => (0, 6),
     }
 }
 
@@ -600,6 +611,13 @@ impl FieldParser<'_> {
         }
 
         let value = self.parse_number(expected)?;
+        // Day-of-week `7` is a cron alias for Sunday (`0`; both are 0-based
+        // Sunday). Normalise it so the stored value is always in 0-6.
+        let value = if self.field == CronFieldName::DayOfWeek && value == 7 {
+            0
+        } else {
+            value
+        };
         let (min, max) = field_bounds(self.field);
         if value < min || value > max {
             return Err(self.error_at(start, expected));
@@ -667,15 +685,80 @@ impl FieldParser<'_> {
 
 // ---- Human-readable conversion ----
 
+/// Returns `true` if the field is the wildcard `*` or a step rooted at `*` (e.g.
+/// `*/2`). Such fields are treated as "unrestricted" for the Vixie cron
+/// day-of-month/day-of-week OR-rule.
+fn field_is_unrestricted(f: &CronField) -> bool {
+    match f {
+        CronField::Any => true,
+        CronField::Step(base, _) => matches!(base.as_ref(), CronField::Any),
+        _ => false,
+    }
+}
+
 fn is_any(f: &CronField) -> bool {
     matches!(f, CronField::Any)
+}
+
+/// Returns `Some("1st, 3rd, 5th")` when `f` is an explicit list of distinct day
+/// numbers (e.g. `1,3,5`), used to render `0 9 * * 1,3,5` as
+/// "At 9:00 AM on the 1st, 3rd, 5th of every month". Returns `None` for any
+/// other shape (ranges, single values, wildcards, steps).
+fn list_days_phrase(f: &CronField) -> Option<String> {
+    let CronField::List(items) = f else {
+        return None;
+    };
+    if items.is_empty() || !items.iter().all(|i| matches!(i, CronField::Value(_))) {
+        return None;
+    }
+    let mut sorted = items.clone();
+    sorted.sort();
+    let parts: Vec<String> = sorted
+        .iter()
+        .map(|i| match i {
+            CronField::Value(d) => ordinal(*d),
+            _ => unreachable!(),
+        })
+        .collect();
+    Some(parts.join(", "))
+}
+
+/// Returns `Some(name)` if the field denotes Monday–Friday (days 1–5) as either
+/// a contiguous range `1-5` or an explicit list `1,2,3,4,5`. Used to render
+/// `0 9 * * 1-5` as "Every weekday at 9:00 AM" instead of a raw reconstruction.
+fn weekday_field(f: &CronField) -> Option<&'static str> {
+    match f {
+        CronField::Range(1, 5) => Some("weekday"),
+        CronField::List(items) if items.len() == 5 => {
+            let mut sorted = items.clone();
+            sorted.sort();
+            if sorted
+                == [
+                    CronField::Value(1),
+                    CronField::Value(2),
+                    CronField::Value(3),
+                    CronField::Value(4),
+                    CronField::Value(5),
+                ]
+            {
+                Some("weekday")
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
 }
 
 fn is_zero(f: &CronField) -> bool {
     matches!(f, CronField::Value(0))
 }
 
-fn format_time(hours: &CronField, minutes: &CronField) -> Option<String> {
+fn format_time(
+    seconds: Option<&CronField>,
+    hours: &CronField,
+    minutes: &CronField,
+) -> Option<String> {
     if let (CronField::Value(h), CronField::Value(m)) = (hours, minutes) {
         let period = if *h < 12 { "AM" } else { "PM" };
         let h12 = match h {
@@ -683,7 +766,11 @@ fn format_time(hours: &CronField, minutes: &CronField) -> Option<String> {
             h if *h <= 12 => *h as u32,
             h => (*h - 12) as u32,
         };
-        Some(format!("{}:{:02} {}", h12, m, period))
+        let sec = match seconds {
+            Some(CronField::Value(s)) if *s != 0 => format!(":{:02}", s),
+            _ => String::new(),
+        };
+        Some(format!("{}:{:02}{} {}", h12, m, sec, period))
     } else {
         None
     }
@@ -731,11 +818,41 @@ fn dow_name(d: u8) -> &'static str {
 }
 
 fn human_readable(expr: &CronExpr) -> String {
+    let sec_any = expr.seconds.as_ref().map_or(true, is_any);
     let min_any = is_any(&expr.minutes);
     let hr_any = is_any(&expr.hours);
     let dom_any = is_any(&expr.dom);
     let mon_any = is_any(&expr.month);
     let dow_any = is_any(&expr.dow);
+
+    // Every second: * * * * * *  (only when a 6-field expression with a
+    // wildcard seconds field — a 5-field expression has no seconds field).
+    if matches!(expr.seconds, Some(CronField::Any))
+        && min_any
+        && hr_any
+        && dom_any
+        && mon_any
+        && dow_any
+    {
+        return "Every second".into();
+    }
+
+    // Every N seconds: */N * * * * *
+    if let Some(CronField::Step(base, n)) = &expr.seconds {
+        if matches!(base.as_ref(), CronField::Any)
+            && min_any
+            && hr_any
+            && dom_any
+            && mon_any
+            && dow_any
+        {
+            return if *n == 1 {
+                "Every second".into()
+            } else {
+                format!("Every {} seconds", n)
+            };
+        }
+    }
 
     // Every minute
     if min_any && hr_any && dom_any && mon_any && dow_any {
@@ -744,8 +861,18 @@ fn human_readable(expr: &CronExpr) -> String {
 
     // Every N minutes: */N * * * *
     if let CronField::Step(base, n) = &expr.minutes {
-        if matches!(base.as_ref(), CronField::Any) && hr_any && dom_any && mon_any && dow_any {
-            return format!("Every {} minutes", n);
+        if matches!(base.as_ref(), CronField::Any)
+            && sec_any
+            && hr_any
+            && dom_any
+            && mon_any
+            && dow_any
+        {
+            return if *n == 1 {
+                "Every minute".into()
+            } else {
+                format!("Every {} minutes", n)
+            };
         }
     }
 
@@ -754,14 +881,39 @@ fn human_readable(expr: &CronExpr) -> String {
         return "Every hour".into();
     }
 
+    // Every N hours: 0 */N * * *
+    if is_zero(&expr.minutes) {
+        if let CronField::Step(base, n) = &expr.hours {
+            if matches!(base.as_ref(), CronField::Any) && dom_any && mon_any && dow_any {
+                return if *n == 1 {
+                    "Every hour".into()
+                } else {
+                    format!("Every {} hours", n)
+                };
+            }
+        }
+    }
+
     // Build time part
-    let time_str = format_time(&expr.hours, &expr.minutes);
+    let time_str = format_time(expr.seconds.as_ref(), &expr.hours, &expr.minutes);
 
     // Specific day of week
     if dom_any && mon_any {
-        if let CronField::Value(d) = expr.dow {
-            if let Some(t) = &time_str {
+        if let Some(t) = &time_str {
+            if weekday_field(&expr.dow).is_some() {
+                return format!("Every weekday at {}", t);
+            }
+            if let CronField::Value(d) = expr.dow {
                 return format!("Every {} at {}", dow_name(d), t);
+            }
+        }
+    }
+
+    // Specific days of week (explicit list), any month/day: 0 9 * * 1,3,5
+    if dom_any && mon_any {
+        if let Some(t) = &time_str {
+            if let Some(days) = list_days_phrase(&expr.dow) {
+                return format!("At {} on the {} of every month", t, days);
             }
         }
     }
@@ -791,11 +943,17 @@ fn human_readable(expr: &CronExpr) -> String {
         }
     }
 
-    // Fallback: reconstruct the expression
+    // Fallback: reconstruct the expression (include seconds when present)
+    let sec_str = expr
+        .seconds
+        .as_ref()
+        .map(|s| format!("{} ", field_str(s)))
+        .unwrap_or_default();
     format!(
-        "At {} past {} on {} of {} ({})",
+        "At {} past {}{}on {} of {} ({})",
         field_str(&expr.minutes),
         field_str(&expr.hours),
+        sec_str,
         field_str(&expr.dom),
         field_str(&expr.month),
         field_str(&expr.dow),
@@ -866,6 +1024,52 @@ mod tests {
         let e = CronExpr::parse("30 0 9 * * *").unwrap();
         assert!(e.is_6_field());
         assert_eq!(e.seconds, Some(CronField::Value(30)));
+    }
+
+    #[test]
+    fn human_readable_includes_seconds_6field() {
+        assert_eq!(
+            CronExpr::parse("*/10 * * * * *")
+                .unwrap()
+                .to_human_readable(),
+            "Every 10 seconds"
+        );
+        assert_eq!(
+            CronExpr::parse("* * * * * *").unwrap().to_human_readable(),
+            "Every second"
+        );
+        assert_eq!(
+            CronExpr::parse("30 0 9 * * *").unwrap().to_human_readable(),
+            "Every day at 9:00:30 AM"
+        );
+        assert_eq!(
+            CronExpr::parse("0 0 9 * * *").unwrap().to_human_readable(),
+            "Every day at 9:00 AM"
+        );
+    }
+
+    #[test]
+    fn human_readable_common_expressions_are_grammatical() {
+        // These are the README/example expressions; previously they collapsed to
+        // gibberish like "At 0 past 9 on * of * (1-5)".
+        assert_eq!(
+            CronExpr::parse("0 9 * * 1-5").unwrap().to_human_readable(),
+            "Every weekday at 9:00 AM"
+        );
+        assert_eq!(
+            CronExpr::parse("0 9 * * 1,3,5")
+                .unwrap()
+                .to_human_readable(),
+            "At 9:00 AM on the 1st, 3rd, 5th of every month"
+        );
+        assert_eq!(
+            CronExpr::parse("0 */2 * * *").unwrap().to_human_readable(),
+            "Every 2 hours"
+        );
+        assert_eq!(
+            CronExpr::parse("*/1 * * * *").unwrap().to_human_readable(),
+            "Every minute"
+        );
     }
 
     #[test]
@@ -1112,10 +1316,54 @@ mod tests {
     }
 
     #[test]
-    fn day_of_week_seven_is_allowed() {
+    fn day_of_week_seven_normalises_to_zero() {
+        // Day-of-week `7` is a cron alias for Sunday (`0`); it is accepted on
+        // input but normalised to `0` so the stored value is always in 0-6.
         let e = CronExpr::parse("0 0 * * 7").unwrap();
-        assert_eq!(e.dow, CronField::Value(7));
+        assert_eq!(e.dow, CronField::Value(0));
         assert_eq!(e.to_human_readable(), "Every Sunday at 12:00 AM");
+    }
+
+    #[test]
+    fn dow_wildcard_has_seven_distinct_days() {
+        // `*` over day-of-week must yield exactly 7 values (Sun-Sat), not 8.
+        let e = CronExpr::parse("* * * * *").unwrap();
+        assert_eq!(e.dow.expand(0, 6), vec![0, 1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn vixie_or_rule_and_with_step_on_star() {
+        // `*/2` on day-of-month is treated as unrestricted, so the schedule is
+        // AND-ed with day-of-week: it fires only on Mondays, not every even day.
+        // After Mon 2024-01-01 the next matching minute is Mon 2024-01-08
+        // (an even day would fire first under the buggy OR behaviour).
+        use chrono::{Datelike, TimeZone, Utc, Weekday};
+        let expr = CronExpr::parse("0 0 */2 * MON").unwrap();
+        let after = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(); // Monday
+        let next = expr.next_after(after).unwrap();
+        assert_eq!(next.weekday(), Weekday::Mon);
+        assert_eq!(next, Utc.with_ymd_and_hms(2024, 1, 8, 0, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn vixie_or_rule_union_when_both_restricted() {
+        // When both dom and dow are explicitly restricted they are OR-ed.
+        use chrono::{Datelike, TimeZone, Utc, Weekday};
+        let expr = CronExpr::parse("0 0 1 * MON").unwrap();
+        let after = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(); // Monday, 1st
+        let next = expr.next_after(after).unwrap();
+        // The 1st is a Monday here, so it fires immediately after `after`.
+        assert!(next.day() == 1 || next.weekday() == Weekday::Mon);
+    }
+
+    #[test]
+    fn leap_year_gap_spans_eight_years() {
+        // `0 0 29 2 *` must be found across the 2096→2104 leap-year gap.
+        use chrono::{Datelike, TimeZone, Utc};
+        let expr = CronExpr::parse("0 0 29 2 *").unwrap();
+        let after = Utc.with_ymd_and_hms(2096, 3, 1, 0, 0, 0).unwrap();
+        let next = expr.next_after(after).unwrap();
+        assert_eq!((next.year(), next.month(), next.day()), (2104, 2, 29));
     }
 
     #[test]

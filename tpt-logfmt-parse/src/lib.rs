@@ -54,9 +54,10 @@ fn hex_digit(byte: u8) -> Option<u8> {
 /// input; a token is only copied when it contains escape sequences that have to
 /// be decoded. Keys without a `=` are yielded with an empty-string value.
 ///
-/// Values (and keys) may be quoted, in which case `\"`, `\\`, `\n`, `\r`, `\t`
-/// and `\xNN` escapes are decoded — exactly like [`parse_to_map`] and
-/// [`parse_to_pairs`], which are implemented on top of this iterator.
+/// Values (and keys) may be quoted, in which case `\"`, `\\`, `\/`, `\b`, `\f`,
+/// `\n`, `\r`, `\t`, `\xNN` and `\uXXXX` (including surrogate pairs) escapes are
+/// decoded — exactly like [`parse_to_map`] and [`parse_to_pairs`], which are
+/// implemented on top of this iterator.
 ///
 /// Whitespace (space, tab, carriage return, line feed) separates tokens, so a
 /// trailing newline never becomes part of the final value.
@@ -148,10 +149,14 @@ impl<'a> LogfmtParser<'a> {
                     match escaped {
                         '"' => buf.push('"'),
                         '\\' => buf.push('\\'),
+                        '/' => buf.push('/'),
+                        'b' => buf.push('\u{08}'),
+                        'f' => buf.push('\u{0C}'),
                         'n' => buf.push('\n'),
                         'r' => buf.push('\r'),
                         't' => buf.push('\t'),
                         'x' => self.decode_hex_escape(&mut buf),
+                        'u' => self.decode_unicode_escape(&mut buf),
                         other => {
                             buf.push('\\');
                             buf.push(other);
@@ -176,6 +181,58 @@ impl<'a> LogfmtParser<'a> {
             buf.push('\\');
             buf.push('x');
         }
+    }
+
+    /// Read four hexadecimal digits at `self.pos`, advancing past them on
+    /// success. Returns `None` if fewer than four hex digits remain.
+    fn read_hex4(&mut self) -> Option<u32> {
+        let bytes = self.input.as_bytes();
+        if self.pos + 4 > bytes.len() {
+            return None;
+        }
+        let mut code = 0u32;
+        for _ in 0..4 {
+            let digit = hex_digit(bytes[self.pos])?;
+            code = code * 16 + digit as u32;
+            self.pos += 1;
+        }
+        Some(code)
+    }
+
+    /// Decode a `\uXXXX` escape, combining a high/low surrogate pair into a single
+    /// code point when a following `\uXXXX` provides the low surrogate. An
+    /// unrepresentable escape is reproduced verbatim (backslash + `uXXXX`) so the
+    /// output stays lossless.
+    fn decode_unicode_escape(&mut self, buf: &mut String) {
+        let hi = match self.read_hex4() {
+            Some(code) => code,
+            None => {
+                buf.push_str("\\u");
+                return;
+            }
+        };
+        if let Some(c) = char::from_u32(hi) {
+            buf.push(c);
+            return;
+        }
+        if (0xD800..=0xDBFF).contains(&hi) {
+            let save = self.pos;
+            let bytes = self.input.as_bytes();
+            if bytes.get(self.pos) == Some(&b'\\') && bytes.get(self.pos + 1) == Some(&b'u') {
+                self.pos += 2;
+                if let Some(lo) = self.read_hex4() {
+                    if (0xDC00..=0xDFFF).contains(&lo) {
+                        let combined = 0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00);
+                        if let Some(c) = char::from_u32(combined) {
+                            buf.push(c);
+                            return;
+                        }
+                    }
+                }
+            }
+            self.pos = save;
+        }
+        buf.push_str(&format!("\\u{:04x}", hi));
     }
 
     /// Consume the token the parser choked on so iteration always progresses.
@@ -226,7 +283,22 @@ impl<'a> Iterator for LogfmtParser<'a> {
         if self.peek() == Some(b'"') {
             Some(self.parse_quoted().map(|value| (key, value)))
         } else {
-            Some(Ok((key, Cow::Borrowed(self.parse_bare()))))
+            // Bare (unquoted) value: read until whitespace, then reject any `=`
+            // or `"` contained within — they make the token ambiguous and would
+            // otherwise be silently truncated. `pos` is left advanced past the
+            // whole token so iteration always progresses.
+            let start = self.pos;
+            while self.peek().is_some_and(|b| !is_whitespace(b)) {
+                self.pos += 1;
+            }
+            let value = &self.input[start..self.pos];
+            if value.contains('=') || value.contains('"') {
+                return Some(Err(LogfmtError {
+                    position: start,
+                    message: "unquoted value must not contain '=' or '\"'",
+                }));
+            }
+            Some(Ok((key, Cow::Borrowed(value))))
         }
     }
 }
@@ -288,11 +360,17 @@ pub fn parse_to_pairs(input: &str) -> Result<Vec<(String, String)>, LogfmtError>
 
 /// The kind of error that occurred while reading a multi-line logfmt stream.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum LogfmtLinesErrorKind {
     /// An I/O error from the underlying reader.
     Io(io::Error),
     /// A logfmt parse error on a specific line.
     Parse(LogfmtError),
+    /// A line exceeded the configured maximum length.
+    LineTooLong {
+        /// The maximum number of bytes allowed per line.
+        max: usize,
+    },
 }
 
 impl fmt::Display for LogfmtLinesErrorKind {
@@ -300,6 +378,7 @@ impl fmt::Display for LogfmtLinesErrorKind {
         match self {
             Self::Io(e) => write!(f, "I/O error: {}", e),
             Self::Parse(e) => write!(f, "{}", e),
+            Self::LineTooLong { max } => write!(f, "line exceeds maximum length of {} bytes", max),
         }
     }
 }
@@ -326,6 +405,7 @@ impl std::error::Error for LogfmtLinesError {
         match &self.kind {
             LogfmtLinesErrorKind::Io(e) => Some(e),
             LogfmtLinesErrorKind::Parse(e) => Some(e),
+            LogfmtLinesErrorKind::LineTooLong { .. } => None,
         }
     }
 }
@@ -352,16 +432,31 @@ pub struct LogfmtLinesReader<R: BufRead> {
     reader: R,
     buf: String,
     line: u64,
+    max_line_length: usize,
 }
 
 impl<R: BufRead> LogfmtLinesReader<R> {
     /// Create a new `LogfmtLinesReader` wrapping the given buffered reader.
+    ///
+    /// By default lines are unbounded. Use [`LogfmtLinesReader::with_max_line_length`]
+    /// to cap the number of bytes per line; a line that exceeds the cap yields a
+    /// [`LogfmtLinesErrorKind::LineTooLong`] error instead of allocating without
+    /// bound.
     pub fn new(reader: R) -> Self {
         Self {
             reader,
             buf: String::new(),
             line: 0,
+            max_line_length: usize::MAX,
         }
+    }
+
+    /// Set the maximum number of bytes allowed per line. Lines longer than this
+    /// produce a [`LogfmtLinesErrorKind::LineTooLong`] error. Returns `self` for
+    /// chaining.
+    pub fn with_max_line_length(mut self, max: usize) -> Self {
+        self.max_line_length = max;
+        self
     }
 
     /// The 1-based line number most recently read (or 0 before any reads).
@@ -387,6 +482,14 @@ impl<R: BufRead> Iterator for LogfmtLinesReader<R> {
                 Ok(0) => return None,
                 Ok(_) => {
                     self.line += 1;
+                    if self.buf.len() > self.max_line_length {
+                        return Some(Err(LogfmtLinesError {
+                            line: self.line,
+                            kind: LogfmtLinesErrorKind::LineTooLong {
+                                max: self.max_line_length,
+                            },
+                        }));
+                    }
                     let line = self.line;
                     let trimmed = self.buf.trim();
                     if trimmed.is_empty() {
@@ -425,9 +528,10 @@ pub fn parse_logfmt_lines<R: BufRead>(reader: R) -> LogfmtLinesReader<R> {
 /// Serialize a single `key=value` field into logfmt form.
 ///
 /// The key and value are quoted when they are empty or contain a space, quote,
-/// backslash, `=`, or any control character; inside quotes `"`, `\`, and
-/// control characters are escaped (`\"`, `\\`, `\n`, `\r`, `\t`, `\xNN`). The
-/// output always parses back to the original key and value.
+/// backslash, `=`, or any control character; inside quotes `"`, `\`, `/`, and
+/// control characters are escaped (`\"`, `\\`, `\n`, `\r`, `\t`, `\b`, `\f`,
+/// `\/`, and `\uXXXX` for other control bytes). The output always parses back to
+/// the original key and value.
 ///
 /// # Example
 ///
@@ -497,22 +601,18 @@ fn push_token(out: &mut String, s: &str) {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            other if other.is_control() => push_hex_escape(out, other),
+            other if other.is_control() => push_unicode_escape(out, other),
             other => out.push(other),
         }
     }
     out.push('"');
 }
 
-fn push_hex_escape(out: &mut String, c: char) {
-    const HEX: [char; 16] = [
-        '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f',
-    ];
+fn push_unicode_escape(out: &mut String, c: char) {
     let code = c as u32;
     out.push('\\');
-    out.push('x');
-    out.push(HEX[((code >> 4) & 0xf) as usize]);
-    out.push(HEX[(code & 0xf) as usize]);
+    out.push('u');
+    out.push_str(&format!("{:04x}", code));
 }
 
 #[cfg(test)]
@@ -733,8 +833,48 @@ mod tests {
         assert_eq!(write_logfmt(vec![("msg", "a\nb")]), r#"msg="a\nb""#);
         assert_eq!(write_logfmt(vec![("msg", "a\tb")]), r#"msg="a\tb""#);
         assert_eq!(write_logfmt(vec![("msg", "a\rb")]), r#"msg="a\rb""#);
-        assert_eq!(write_logfmt(vec![("msg", "a\u{7}b")]), r#"msg="a\x07b""#);
+        // Other control bytes are written as `\uXXXX` (go-logfmt rejects `\xNN`).
+        assert_eq!(write_logfmt(vec![("msg", "a\u{7}b")]), r#"msg="a\u0007b""#);
+        assert_eq!(write_logfmt(vec![("msg", "a\u{7f}b")]), r#"msg="a\u007fb""#);
         assert!(!write_logfmt(vec![("msg", "a\nb")]).contains('\n'));
+    }
+
+    #[test]
+    fn parser_decodes_unicode_and_special_escapes() {
+        // go-logfmt escapes that the old decoder silently passed through.
+        let map = parse_to_map(r#"a="\b\f\/" b="\u0041\u00e9" c="\uD83C\uDF89""#).unwrap();
+        assert_eq!(map["a"], "\u{8}\u{c}/");
+        assert_eq!(map["b"], "Aé");
+        assert_eq!(map["c"], "🎉");
+    }
+
+    #[test]
+    fn writer_round_trips_unicode_escapes() {
+        let pairs = vec![pair("bell", "a\u{7}b"), pair("emoji", "🎉")];
+        let line = write_logfmt(pairs.clone());
+        assert_eq!(parse_to_pairs(&line).unwrap(), pairs);
+    }
+
+    #[test]
+    fn bare_value_with_equals_or_quote_errors() {
+        // `=`/`"` inside an unquoted value is ambiguous and must be rejected
+        // rather than silently truncated.
+        assert!(parse_to_pairs("sig=YWJjZA==").is_err());
+        assert!(parse_to_map(r#"msg=say"hi""#).is_err());
+        // The same data, quoted, is fine and round-trips.
+        assert!(parse_to_map(r#"sig="YWJjZA==""#).is_ok());
+    }
+
+    #[test]
+    fn lines_reader_enforces_max_line_length() {
+        let data = b"a=1\nthis line is far too long to be allowed and should be rejected before it allocates\nb=2\n";
+        let mut reader =
+            LogfmtLinesReader::new(BufReader::new(data.as_slice())).with_max_line_length(10);
+        assert!(reader.next().unwrap().is_ok());
+        let err = reader.next().unwrap().unwrap_err();
+        assert!(matches!(err.kind, LogfmtLinesErrorKind::LineTooLong { .. }));
+        assert_eq!(err.line, 2);
+        assert!(reader.next().unwrap().is_ok());
     }
 
     #[test]

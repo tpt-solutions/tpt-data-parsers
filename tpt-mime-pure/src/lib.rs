@@ -93,6 +93,33 @@ pub enum MimeType {
     Woff2,
     /// `application/x-java-class`
     JavaClass,
+    // Archives / containers
+    /// `application/x-7z-compressed`
+    SevenZ,
+    /// `application/vnd.rar`
+    Rar,
+    /// `application/x-bzip2`
+    Bzip2,
+    /// `application/x-ole-storage` (legacy Office, e.g. `.doc`/`.xls`/`.ppt`)
+    Ole2,
+    /// `application/x-mach-binary` (thin Mach-O)
+    Macho,
+    // Fonts
+    /// `font/ttf` (TrueType)
+    Ttf,
+    /// `font/otf` (OpenType)
+    Otf,
+    // Text / markup
+    /// `application/json`
+    Json,
+    /// `application/xml`
+    Xml,
+    /// `text/html`
+    Html,
+    /// `image/svg+xml`
+    Svg,
+    /// `text/plain`
+    Text,
 }
 
 impl MimeType {
@@ -138,6 +165,18 @@ impl MimeType {
             Self::Woff => "font/woff",
             Self::Woff2 => "font/woff2",
             Self::JavaClass => "application/x-java-class",
+            Self::SevenZ => "application/x-7z-compressed",
+            Self::Rar => "application/vnd.rar",
+            Self::Bzip2 => "application/x-bzip2",
+            Self::Ole2 => "application/x-ole-storage",
+            Self::Macho => "application/x-mach-binary",
+            Self::Ttf => "font/ttf",
+            Self::Otf => "font/otf",
+            Self::Json => "application/json",
+            Self::Xml => "application/xml",
+            Self::Html => "text/html",
+            Self::Svg => "image/svg+xml",
+            Self::Text => "text/plain",
         }
     }
 
@@ -181,6 +220,18 @@ impl MimeType {
             Self::Woff => "woff",
             Self::Woff2 => "woff2",
             Self::JavaClass => "class",
+            Self::SevenZ => "7z",
+            Self::Rar => "rar",
+            Self::Bzip2 => "bz2",
+            Self::Ole2 => "doc",
+            Self::Macho => "o",
+            Self::Ttf => "ttf",
+            Self::Otf => "otf",
+            Self::Json => "json",
+            Self::Xml => "xml",
+            Self::Html => "html",
+            Self::Svg => "svg",
+            Self::Text => "txt",
         }
     }
 }
@@ -241,7 +292,7 @@ pub fn detect(bytes: &[u8]) -> Option<MimeType> {
 /// let all: Vec<MimeType> = detect_all(&[0xFF, 0xD8, 0xFF, 0xE0]).collect();
 /// assert_eq!(all, vec![MimeType::Jpeg]);
 ///
-/// assert_eq!(detect_all(b"hello world").next(), None);
+/// assert_eq!(detect_all(b"hello world").next(), Some(MimeType::Text));
 /// ```
 pub fn detect_all(bytes: &[u8]) -> MimeMatches {
     let mut sink = Sink::new(false);
@@ -336,6 +387,13 @@ fn scan(bytes: &[u8], out: &mut Sink) {
         };
     }
 
+    // TAR: "ustar" at offset 257. Checked early so an offset-anchored signature
+    // wins over the weak 2-byte offset-0 signatures below — a TAR archive whose
+    // first member name begins with `MZ`, `BM`, `%PDF`, etc. is still a TAR.
+    if at_offset!(257, [0x75, 0x73, 0x74, 0x61, 0x72]) {
+        emit!(MimeType::Tar);
+    }
+
     // JPEG: FF D8 FF
     if starts_with!([0xFF, 0xD8, 0xFF]) {
         emit!(MimeType::Jpeg);
@@ -394,11 +452,14 @@ fn scan(bytes: &[u8], out: &mut Sink) {
     if starts_with!([0x4F, 0x67, 0x67, 0x53]) {
         emit!(MimeType::Ogg);
     }
-    // MP3: ID3 tag or sync word FF FB/FA/F3/F2
+    // MP3: ID3 tag, or an MPEG Audio frame sync (0xFF followed by a Layer III
+    // frame header for any MPEG version, including MPEG-2.5 Layer III `FF E3`).
+    // The mask `(b[1] & 0xE6) == 0xE2` requires sync bits `111`, layer `01`
+    // (Layer III) and version ≠ reserved (`01`).
     if starts_with!([0x49, 0x44, 0x33]) {
         emit!(MimeType::Mp3);
     }
-    if len >= 2 && b[0] == 0xFF && (b[1] == 0xFB || b[1] == 0xFA || b[1] == 0xF3 || b[1] == 0xF2) {
+    if len >= 2 && b[0] == 0xFF && (b[1] & 0xE6) == 0xE2 {
         emit!(MimeType::Mp3);
     }
     // MKV / WebM: EBML magic 1A 45 DF A3. Both share the same EBML header but
@@ -411,22 +472,11 @@ fn scan(bytes: &[u8], out: &mut Sink) {
         return;
     }
     // MP4 / MOV / 3GP / HEIC / HEIF / AVIF: ISO-BMFF `ftyp` box at offset 4.
-    // The 4-byte major-brand string at offset 8 distinguishes the variants;
-    // unknown brands fall back to MP4.
+    // Both the major brand (offset 8) and the list of compatible brands are
+    // consulted, so an AVIF file declared as major `mif1` but advertising `avif`
+    // in its compatible-brand list is recognised as `image/avif`.
     if at_offset!(4, [0x66, 0x74, 0x79, 0x70]) {
-        let kind = if len >= 12 {
-            match &b[8..12] {
-                b"heic" | b"heix" | b"hevc" | b"hevx" => MimeType::Heic,
-                b"mif1" => MimeType::Heif,
-                b"avif" | b"avis" => MimeType::Avif,
-                b"qt  " => MimeType::QuickTime,
-                b"3gp4" | b"3gp5" | b"3gp6" | b"3gr6" | b"3gs6" | b"3gpp" => MimeType::ThreeGp,
-                _ => MimeType::Mp4,
-            }
-        } else {
-            MimeType::Mp4
-        };
-        emit!(kind);
+        emit!(ftyp_kind(b));
         return;
     }
     // WAV: RIFF at 0, WAVE at offset 8
@@ -436,10 +486,6 @@ fn scan(bytes: &[u8], out: &mut Sink) {
     // AVI: RIFF at 0, AVI  at offset 8
     if starts_with!([0x52, 0x49, 0x46, 0x46]) && at_offset!(8, [0x41, 0x56, 0x49, 0x20]) {
         emit!(MimeType::Avi);
-    }
-    // TAR: "ustar" at offset 257
-    if at_offset!(257, [0x75, 0x73, 0x74, 0x61, 0x72]) {
-        emit!(MimeType::Tar);
     }
     // BMP: BM
     if starts_with!([0x42, 0x4D]) {
@@ -462,6 +508,30 @@ fn scan(bytes: &[u8], out: &mut Sink) {
     if starts_with!([0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00]) {
         emit!(MimeType::Xz);
     }
+    // 7z: 37 7A BC AF 27 1C
+    if starts_with!([0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C]) {
+        emit!(MimeType::SevenZ);
+    }
+    // RAR: "Rar!" followed by 1A 07 (RAR4) or 1A 07 01 (RAR5)
+    if starts_with!([0x52, 0x61, 0x72, 0x21, 0x1A, 0x07]) {
+        emit!(MimeType::Rar);
+    }
+    // bzip2: "BZh"
+    if starts_with!([0x42, 0x5A, 0x68]) {
+        emit!(MimeType::Bzip2);
+    }
+    // Legacy OLE2 (older Office, e.g. .doc/.xls/.ppt): D0 CF 11 E0 A1 B1 1A E1
+    if starts_with!([0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]) {
+        emit!(MimeType::Ole2);
+    }
+    // Thin Mach-O (32/64-bit, native or byte-swapped)
+    if starts_with!([0xFE, 0xED, 0xFA, 0xCE])
+        || starts_with!([0xFE, 0xED, 0xFA, 0xCF])
+        || starts_with!([0xCE, 0xFA, 0xED, 0xFE])
+        || starts_with!([0xCF, 0xFA, 0xED, 0xFE])
+    {
+        emit!(MimeType::Macho);
+    }
     // WOFF: "wOFF"
     if starts_with!([0x77, 0x4F, 0x46, 0x46]) {
         emit!(MimeType::Woff);
@@ -470,9 +540,22 @@ fn scan(bytes: &[u8], out: &mut Sink) {
     if starts_with!([0x77, 0x4F, 0x46, 0x32]) {
         emit!(MimeType::Woff2);
     }
+    // OpenType: "OTTO"
+    if starts_with!([0x4F, 0x54, 0x54, 0x4F]) {
+        emit!(MimeType::Otf);
+    }
+    // TrueType: 00 01 00 00 or the "true" tag
+    if starts_with!([0x00, 0x01, 0x00, 0x00]) || starts_with!([0x74, 0x72, 0x75, 0x65]) {
+        emit!(MimeType::Ttf);
+    }
     // Java class file: CA FE BA BE
     if starts_with!([0xCA, 0xFE, 0xBA, 0xBE]) {
         emit!(MimeType::JavaClass);
+    }
+
+    // Text / markup fallback: only reached when no binary signature matched.
+    if let Some(kind) = text_kind(b) {
+        emit!(kind);
     }
 }
 
@@ -571,6 +654,107 @@ fn zip_subtype(b: &[u8]) -> Option<MimeType> {
         pos += 1;
     }
     None
+}
+
+/// Pick the most specific ISO-BMFF variant by inspecting the `ftyp` major brand
+/// and every compatible brand (4 bytes each, starting at offset 8). AVIF ranks
+/// above HEIF so a `mif1`-major file that advertises `avif` is still AVIF.
+fn ftyp_kind(b: &[u8]) -> MimeType {
+    let len = b.len();
+    let mut best = MimeType::Mp4;
+    let mut i = 8;
+    while i + 4 <= len {
+        let candidate = match &b[i..i + 4] {
+            b"avif" | b"avis" => MimeType::Avif,
+            b"heic" | b"heix" | b"hevc" | b"hevx" => MimeType::Heic,
+            b"mif1" => MimeType::Heif,
+            b"qt  " => MimeType::QuickTime,
+            b"3gp4" | b"3gp5" | b"3gp6" | b"3gr6" | b"3gs6" | b"3gpp" => MimeType::ThreeGp,
+            _ => MimeType::Mp4,
+        };
+        if ftyp_rank(candidate) > ftyp_rank(best) {
+            best = candidate;
+        }
+        i += 4;
+    }
+    best
+}
+
+fn ftyp_rank(m: MimeType) -> u8 {
+    match m {
+        MimeType::Mp4 => 0,
+        MimeType::ThreeGp => 1,
+        MimeType::QuickTime => 2,
+        MimeType::Heif => 3,
+        MimeType::Heic => 4,
+        MimeType::Avif => 5,
+        _ => 0,
+    }
+}
+
+/// Classify a chunk of bytes that matched no binary magic signature.
+///
+/// Recognises the common text/markup formats (JSON, XML, HTML, SVG) and, as a
+/// final fallback, any valid UTF-8 input as `text/plain`. An empty input is
+/// `None` (the binary checks above would otherwise have returned for it).
+fn text_kind(b: &[u8]) -> Option<MimeType> {
+    if b.is_empty() {
+        return None;
+    }
+    // Skip a UTF-8 BOM if present so the content sniff below sees real bytes.
+    let content = if b.len() >= 3 && b[..3] == [0xEF, 0xBB, 0xBF] {
+        &b[3..]
+    } else {
+        b
+    };
+    let trimmed = trim_ascii_whitespace(content);
+    if matches!(trimmed.first(), Some(b'{' | b'[')) {
+        return Some(MimeType::Json);
+    }
+    if trimmed.len() >= 5 && &trimmed[..5] == b"<?xml" {
+        return Some(MimeType::Xml);
+    }
+    if trimmed.len() >= 4 && &trimmed[..4] == b"<svg" {
+        return Some(MimeType::Svg);
+    }
+    if (trimmed.len() >= 15 && trimmed[..15].eq_ignore_ascii_case(b"<!doctype html>"))
+        || (trimmed.len() >= 5 && trimmed[..5].eq_ignore_ascii_case(b"<html"))
+        || (trimmed.len() >= 6 && trimmed[..6].eq_ignore_ascii_case(b"<head>"))
+        || (trimmed.len() >= 6 && trimmed[..6].eq_ignore_ascii_case(b"<body>"))
+    {
+        return Some(MimeType::Html);
+    }
+    core::str::from_utf8(b)
+        .ok()
+        .filter(|_| is_textual(b))
+        .map(|_| MimeType::Text)
+}
+
+/// Returns `true` when every byte is valid UTF-8 and the slice contains no NUL or
+/// control characters other than tab/line-feed/carriage-return — i.e. it looks
+/// like real text rather than an arbitrary binary buffer (which may still be
+/// valid UTF-8 byte-for-byte, e.g. a run of NULs).
+fn is_textual(b: &[u8]) -> bool {
+    b.iter()
+        .all(|&c| c == b'\t' || c == b'\n' || c == b'\r' || c >= 0x20)
+}
+
+fn trim_ascii_whitespace(mut b: &[u8]) -> &[u8] {
+    while let [first, rest @ ..] = b {
+        if first.is_ascii_whitespace() {
+            b = rest;
+        } else {
+            break;
+        }
+    }
+    while let [rest @ .., last] = b {
+        if last.is_ascii_whitespace() {
+            b = rest;
+        } else {
+            break;
+        }
+    }
+    b
 }
 
 /// Detect MIME type from a file extension (without leading dot, case-insensitive).
@@ -705,6 +889,39 @@ pub fn detect_by_extension(ext: &str) -> Option<MimeType> {
     }
     if eq("class") {
         return Some(MimeType::JavaClass);
+    }
+    if eq("7z") {
+        return Some(MimeType::SevenZ);
+    }
+    if eq("rar") {
+        return Some(MimeType::Rar);
+    }
+    if eq("bz2") || eq("bzip2") {
+        return Some(MimeType::Bzip2);
+    }
+    if eq("doc") || eq("xls") || eq("ppt") {
+        return Some(MimeType::Ole2);
+    }
+    if eq("ttf") {
+        return Some(MimeType::Ttf);
+    }
+    if eq("otf") {
+        return Some(MimeType::Otf);
+    }
+    if eq("json") {
+        return Some(MimeType::Json);
+    }
+    if eq("xml") {
+        return Some(MimeType::Xml);
+    }
+    if eq("html") || eq("htm") {
+        return Some(MimeType::Html);
+    }
+    if eq("svg") {
+        return Some(MimeType::Svg);
+    }
+    if eq("txt") {
+        return Some(MimeType::Text);
     }
 
     None
@@ -863,7 +1080,10 @@ mod tests {
 
     #[test]
     fn unknown_returns_none() {
-        assert_eq!(detect(b"hello world"), None);
+        // Non-matching, invalid-UTF-8 binary-ish input stays None; a plain
+        // UTF-8 string is now classified as text/plain (see text detection).
+        assert_eq!(detect(&[0x01, 0x02, 0x03, 0x04]), None);
+        assert_eq!(detect(b"hello world"), Some(MimeType::Text));
     }
 
     #[test]
@@ -1139,7 +1359,9 @@ mod tests {
 
     #[test]
     fn detect_all_no_match_is_empty() {
-        assert_eq!(detect_all(b"hello world").count(), 0);
+        // Non-matching binary input yields nothing; a UTF-8 string is text.
+        assert_eq!(detect_all(&[0x01, 0x02, 0x03, 0x04]).count(), 0);
+        assert_eq!(detect_all(b"hello world").count(), 1);
     }
 
     #[test]
@@ -1185,5 +1407,112 @@ mod tests {
         let detected = detect_file(&path);
         let _ = std::fs::remove_file(&path);
         assert_eq!(detected.unwrap(), Some(MimeType::Tar));
+    }
+
+    // --- Phase 21b / 22 detection-quality fixes ---
+
+    fn tar_with_first_member(name: &[u8]) -> [u8; 300] {
+        let mut bytes = [0u8; 300];
+        bytes[257..262].copy_from_slice(b"ustar");
+        // First member name sits at offset 0 in the first 512-byte block.
+        let n = name.len().min(100);
+        bytes[..n].copy_from_slice(&name[..n]);
+        bytes
+    }
+
+    #[test]
+    fn tar_not_shadowed_by_short_offset_zero_signatures() {
+        // A TAR whose first member name begins with `MZ`, `%PDF` or `BM` must
+        // still be detected as a TAR, not as EXE/PDF/BMP.
+        assert_eq!(
+            detect(&tar_with_first_member(b"MZ-report.txt")),
+            Some(MimeType::Tar)
+        );
+        assert_eq!(
+            detect(&tar_with_first_member(b"%PDF-cover")),
+            Some(MimeType::Tar)
+        );
+        assert_eq!(
+            detect(&tar_with_first_member(b"BM-header")),
+            Some(MimeType::Tar)
+        );
+    }
+
+    #[test]
+    fn avif_detected_from_compatible_brand() {
+        // Major brand `mif1` with `avif` in the compatible-brand list.
+        let bytes = [
+            0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70, b'm', b'i', b'f', b'1', 0x00, 0x00,
+            0x00, 0x00, b'a', b'v', b'i', b'f', 0x00, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(detect(&bytes), Some(MimeType::Avif));
+    }
+
+    #[test]
+    fn mp3_mpeg25_layer3_sync() {
+        // 0xFF 0xE3 is MPEG-2.5 Layer III — previously undetected.
+        assert_eq!(detect(&[0xFF, 0xE3, 0x90, 0x00]), Some(MimeType::Mp3));
+        // Reserved version (0xFF 0xE5 etc.) stays unmatched by the sync mask.
+        assert_eq!(detect(&[0xFF, 0xE5, 0x00, 0x00]), None);
+    }
+
+    #[test]
+    fn new_container_and_text_formats() {
+        assert_eq!(
+            detect(&[0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C]),
+            Some(MimeType::SevenZ)
+        );
+        assert_eq!(
+            detect(&[0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x01, 0x00]),
+            Some(MimeType::Rar)
+        );
+        assert_eq!(detect(&[0x42, 0x5A, 0x68, 0x39]), Some(MimeType::Bzip2));
+        assert_eq!(
+            detect(&[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]),
+            Some(MimeType::Ole2)
+        );
+        assert_eq!(detect(&[0xFE, 0xED, 0xFA, 0xCE]), Some(MimeType::Macho));
+        assert_eq!(detect(&[0xCE, 0xFA, 0xED, 0xFE]), Some(MimeType::Macho));
+        assert_eq!(detect(&[0x4F, 0x54, 0x54, 0x4F]), Some(MimeType::Otf));
+        assert_eq!(detect(&[0x00, 0x01, 0x00, 0x00]), Some(MimeType::Ttf));
+        assert_eq!(detect(b"true\x00\x01\x00"), Some(MimeType::Ttf));
+    }
+
+    #[test]
+    fn text_and_markup_detection() {
+        assert_eq!(detect(b"  \n  {\"a\":1}"), Some(MimeType::Json));
+        assert_eq!(detect(b"[1,2,3]"), Some(MimeType::Json));
+        assert_eq!(detect(b"<?xml version=\"1.0\"?>"), Some(MimeType::Xml));
+        assert_eq!(
+            detect(b"<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>"),
+            Some(MimeType::Svg)
+        );
+        assert_eq!(
+            detect(b"<!DOCTYPE html><html></html>"),
+            Some(MimeType::Html)
+        );
+        assert_eq!(detect(b"<html><body>x</body></html>"), Some(MimeType::Html));
+        assert_eq!(detect(b"just some plain text"), Some(MimeType::Text));
+        // UTF-8 BOM is skipped before content sniffing.
+        assert_eq!(
+            detect(&[0xEF, 0xBB, 0xBF, b'{', 0x22, 0x61, 0x22, 0x3A, 0x31]),
+            Some(MimeType::Json)
+        );
+        // Invalid UTF-8 that matches no binary sig stays None.
+        assert_eq!(detect(&[0x80, 0x81, 0x82, 0x83]), None);
+    }
+
+    #[test]
+    fn ext_new_format_variants() {
+        assert_eq!(detect_by_extension("7z"), Some(MimeType::SevenZ));
+        assert_eq!(detect_by_extension("rar"), Some(MimeType::Rar));
+        assert_eq!(detect_by_extension("bz2"), Some(MimeType::Bzip2));
+        assert_eq!(detect_by_extension("doc"), Some(MimeType::Ole2));
+        assert_eq!(detect_by_extension("ttf"), Some(MimeType::Ttf));
+        assert_eq!(detect_by_extension("otf"), Some(MimeType::Otf));
+        assert_eq!(detect_by_extension("json"), Some(MimeType::Json));
+        assert_eq!(detect_by_extension("svg"), Some(MimeType::Svg));
+        assert_eq!(detect_by_extension("html"), Some(MimeType::Html));
+        assert_eq!(detect_by_extension("txt"), Some(MimeType::Text));
     }
 }
