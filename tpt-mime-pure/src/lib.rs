@@ -236,6 +236,101 @@ impl MimeType {
     }
 }
 
+/// The confidence of a MIME detection, derived from the matched signature's
+/// length and how tightly it is anchored.
+///
+/// Short signatures that occur naturally in ordinary text or other binary
+/// formats (e.g. `BM` for BMP, `MZ` for EXE, `1F 8B` for gzip) earn [`Low`],
+/// because they produce frequent false positives on untrusted input. Long or
+/// compound/anchored signatures (e.g. the ISO-BMFF `ftyp` brand scan, the
+/// EBML `DocType` walk, a ZIP entry-name lookup, or an 8-byte PNG magic)
+/// earn [`High`]. Text/markup fallbacks are always [`Low`] because any valid
+/// UTF-8 buffer can be misread as `text/plain`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Confidence {
+    /// Short or fallible signature — treat the result as advisory only.
+    Low,
+    /// Moderate, specific signature.
+    Medium,
+    /// Long or compound/anchored signature — high assurance.
+    High,
+}
+
+impl Confidence {
+    /// A stable, lowercase string name for this confidence level.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+}
+
+/// Detect MIME type from the leading bytes of a file, also reporting the
+/// [`Confidence`] (derived from the matched signature's length and anchoring).
+///
+/// This is [`detect`] plus a confidence score; see [`detect`] for the full
+/// matching semantics and false-positive caveats.
+///
+/// # Example
+///
+/// ```
+/// use tpt_mime_pure::{detect_with_confidence, MimeType, Confidence};
+///
+/// let jpeg_header = &[0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
+/// let (mime, conf) = detect_with_confidence(jpeg_header).unwrap();
+/// assert_eq!(mime, MimeType::Jpeg);
+/// assert_eq!(conf, Confidence::High);
+/// ```
+pub fn detect_with_confidence(bytes: &[u8]) -> Option<(MimeType, Confidence)> {
+    detect(bytes).map(|m| (m, signature_confidence(m)))
+}
+
+/// Detect every MIME type whose signature matches the leading bytes, paired
+/// with the [`Confidence`] of each match.
+///
+/// Yields the same matches (and order) as [`detect_all`], each tagged with its
+/// confidence. See [`detect_all`] for the full semantics.
+///
+/// # Example
+///
+/// ```
+/// use tpt_mime_pure::{detect_all_with_confidence, MimeType, Confidence};
+///
+/// let all = detect_all_with_confidence(&[0xFF, 0xD8, 0xFF, 0xE0])
+///     .collect::<Vec<_>>();
+/// assert_eq!(all, vec![(MimeType::Jpeg, Confidence::High)]);
+/// ```
+pub fn detect_all_with_confidence(
+    bytes: &[u8],
+) -> impl Iterator<Item = (MimeType, Confidence)> + '_ {
+    detect_all(bytes).map(|m| (m, signature_confidence(m)))
+}
+
+/// Map a detected [`MimeType`] to the confidence of the signature that
+/// produced it. Longer and more tightly-anchored signatures are more
+/// trustworthy than short, generic ones.
+fn signature_confidence(m: MimeType) -> Confidence {
+    use Confidence::*;
+    match m {
+        // 2-byte offset-0 signatures: frequent false positives.
+        MimeType::Bmp | MimeType::PeExe | MimeType::Gzip => Low,
+        // 2-byte collision-prone magic that the docs flag as risky.
+        MimeType::JavaClass => Medium,
+        // 3-byte signatures: moderately specific.
+        MimeType::Bzip2 => Medium,
+        // 4-byte signatures (still collidable but fairly specific).
+        MimeType::Ico | MimeType::Tiff => Medium,
+        // Text/markup fallbacks: any valid UTF-8 buffer can match.
+        MimeType::Json | MimeType::Xml | MimeType::Html | MimeType::Svg | MimeType::Text => Low,
+        // Everything else is a long (>=4 byte), anchored, or compound
+        // signature (ftyp brand scan, EBML DocType, ZIP entry-name, RIFF
+        // subtype, ISO-BMFF, 8-byte PNG, etc.) — high assurance.
+        _ => High,
+    }
+}
+
 /// Detect MIME type from the leading bytes of a file.
 ///
 /// Checks the leading bytes against known magic byte signatures.
@@ -1514,5 +1609,57 @@ mod tests {
         assert_eq!(detect_by_extension("svg"), Some(MimeType::Svg));
         assert_eq!(detect_by_extension("html"), Some(MimeType::Html));
         assert_eq!(detect_by_extension("txt"), Some(MimeType::Text));
+    }
+
+    #[test]
+    fn confidence_scores_derive_from_signature_strength() {
+        // Long/anchored signatures are High.
+        assert_eq!(
+            detect_with_confidence(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]),
+            Some((MimeType::Png, Confidence::High))
+        );
+        assert_eq!(
+            detect_with_confidence(&[0x1A, 0x45, 0xDF, 0xA3, 0x8B, 0x42, 0x82, 0x84, b'w', b'e', b'b', b'm']),
+            Some((MimeType::WebM, Confidence::High))
+        );
+        // 2-byte signatures are Low (frequent false positives).
+        assert_eq!(
+            detect_with_confidence(&[0x4D, 0x5A, 0x90, 0x00]),
+            Some((MimeType::PeExe, Confidence::Low))
+        );
+        assert_eq!(
+            detect_with_confidence(&[0x42, 0x4D, 0x00, 0x00]),
+            Some((MimeType::Bmp, Confidence::Low))
+        );
+        // Text fallback is Low.
+        assert_eq!(
+            detect_with_confidence(b"just some plain text"),
+            Some((MimeType::Text, Confidence::Low))
+        );
+        // 4-byte signatures that are still collidable are Medium.
+        assert_eq!(
+            detect_with_confidence(&[0xCA, 0xFE, 0xBA, 0xBE, 0x00]),
+            Some((MimeType::JavaClass, Confidence::Medium))
+        );
+        assert_eq!(Confidence::Low.as_str(), "low");
+        assert_eq!(Confidence::High.as_str(), "high");
+        assert!(Confidence::Low < Confidence::High);
+    }
+
+    #[test]
+    fn detect_all_with_confidence_agrees_with_detect_all() {
+        let all: Vec<(MimeType, Confidence)> =
+            detect_all_with_confidence(&[0xFF, 0xD8, 0xFF, 0xE0]).collect();
+        assert_eq!(all, vec![(MimeType::Jpeg, Confidence::High)]);
+
+        let mut bytes = [0u8; 512];
+        bytes[..2].copy_from_slice(b"BM");
+        bytes[257..262].copy_from_slice(b"ustar");
+        let all: Vec<(MimeType, Confidence)> =
+            detect_all_with_confidence(&bytes).collect();
+        assert_eq!(
+            all,
+            vec![(MimeType::Tar, Confidence::High), (MimeType::Bmp, Confidence::Low)]
+        );
     }
 }

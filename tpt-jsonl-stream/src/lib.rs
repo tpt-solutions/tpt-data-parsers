@@ -181,6 +181,11 @@ pub struct JsonlReader<R: BufRead> {
     line: u64,
     max_line_length: usize,
     done: bool,
+    /// Total bytes consumed from the underlying reader so far. Equals the
+    /// absolute byte offset of the next byte to be read, which is what
+    /// [`JsonlReader::byte_offset`] reports and [`JsonlReader::resume_at`]
+    /// seeks to when resuming a stream after a crash.
+    bytes_consumed: u64,
 }
 
 impl<R: BufRead> JsonlReader<R> {
@@ -194,6 +199,7 @@ impl<R: BufRead> JsonlReader<R> {
             line: 0,
             max_line_length: DEFAULT_MAX_LINE_LENGTH,
             done: false,
+            bytes_consumed: 0,
         }
     }
 
@@ -229,6 +235,53 @@ impl<R: BufRead> JsonlReader<R> {
     /// The 1-based line number most recently read (or 0 before any reads).
     pub fn line_number(&self) -> u64 {
         self.line
+    }
+
+    /// The absolute byte offset of the next byte to be read from the underlying
+    /// stream.
+    ///
+    /// Equals the number of bytes consumed so far (including the terminating
+    /// newlines of fully-read lines), so it can be persisted after each record
+    /// and later handed to [`JsonlReader::resume_at`] to continue a stream that
+    /// was interrupted — e.g. a multi-GB `.jsonl` ingest that crashed partway.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use tpt_jsonl_stream::JsonlReader;
+    /// use std::io::BufReader;
+    ///
+    /// let data = b"{\"a\":1}\n{\"b\":2}\n{\"c\":3}\n";
+    /// let mut reader = JsonlReader::new(BufReader::new(data.as_slice()));
+    /// reader.next().unwrap().unwrap();
+    /// assert_eq!(reader.byte_offset(), 8); // len of `{"a":1}\n`
+    /// reader.next().unwrap().unwrap();
+    /// assert_eq!(reader.byte_offset(), 16);
+    /// ```
+    pub fn byte_offset(&self) -> u64 {
+        self.bytes_consumed
+    }
+
+    /// Resume reading from `offset` bytes into the underlying stream.
+    ///
+    /// Seeks the wrapped reader to `offset`, discards any buffered partial line,
+    /// and clears the end-of-stream latch so iteration can continue. Intended to
+    /// be paired with a previously persisted [`JsonlReader::byte_offset`] for
+    /// crash-safe ingestion. Line numbering restarts from the next record read
+    /// (the absolute offset is the source of truth for position), and the
+    /// maximum line length and any parsed-so-far state are reset.
+    ///
+    /// Requires the underlying reader to implement [`std::io::Seek`].
+    pub fn resume_at(&mut self, offset: u64) -> std::io::Result<()>
+    where
+        R: std::io::Seek,
+    {
+        self.reader.seek(std::io::SeekFrom::Start(offset))?;
+        self.buf.clear();
+        self.bytes_consumed = offset;
+        self.line = 0;
+        self.done = false;
+        Ok(())
     }
 
     /// Deserialize every yielded value into `T`.
@@ -293,6 +346,7 @@ impl<R: BufRead> JsonlReader<R> {
                 }
             }
             self.reader.consume(taken);
+            self.bytes_consumed += taken as u64;
             if terminated {
                 break;
             }
@@ -599,6 +653,89 @@ pub fn parse_jsonl<R: BufRead>(reader: R) -> JsonlReader<R> {
     JsonlReader::new(reader)
 }
 
+/// Parse every record of a JSON Lines stream in parallel using [`rayon`].
+///
+/// Available with the optional `rayon` feature. Reads the whole stream into
+/// memory (collected by construction), splits it into lines using the same
+/// blank-line, BOM-on-first-line and `LineTooLong` rules as [`JsonlReader`], and
+/// then parses each line on a worker thread. The returned vector preserves the
+/// original line order; each element is the per-line parse result (with its
+/// 1-based line number) or a [`JsonlError`].
+///
+/// Use this when you have a large, CPU-bound `.jsonl` file and want to saturate
+/// all cores — on multi-core machines this typically beats even the `simd`
+/// single-threaded fast path. For constant-memory streaming use
+/// [`parse_jsonl`] instead.
+///
+/// # Example
+///
+/// ```
+/// # #[cfg(feature = "rayon")]
+/// # {
+/// use tpt_jsonl_stream::parse_jsonl_parallel;
+/// use std::io::BufReader;
+///
+/// let data = b"{\"x\":1}\n{\"x\":2}\n{\"x\":3}\n";
+/// let values = parse_jsonl_parallel(BufReader::new(data.as_slice()));
+/// let values: Vec<_> = values.into_iter().collect::<Result<_, _>>().unwrap();
+/// assert_eq!(values.len(), 3);
+/// assert_eq!(values[2]["x"], 3);
+/// # }
+/// ```
+#[cfg(feature = "rayon")]
+pub fn parse_jsonl_parallel<R: std::io::Read>(
+    reader: R,
+) -> Vec<Result<serde_json::Value, JsonlError>> {
+    use rayon::prelude::*;
+    use std::io::{BufReader, Read};
+
+    let mut reader = BufReader::new(reader);
+    let mut full = Vec::new();
+    match reader.read_to_end(&mut full) {
+        Ok(_) => {}
+        Err(e) => return vec![Err(JsonlError {
+            line: 0,
+            kind: JsonlErrorKind::Io(e),
+        })],
+    }
+
+    // Split into non-blank lines, mirroring the sync reader's rules.
+    let mut lines: Vec<(u64, Vec<u8>)> = Vec::new();
+    let mut line_no: u64 = 0;
+    for raw in full.split(|&b| b == b'\n') {
+        line_no += 1;
+        let end = trim_end_ascii_whitespace(raw);
+        if end == 0 {
+            continue;
+        }
+        let mut start = 0;
+        if line_no == 1 && raw.len() >= 3 && raw[..3] == [0xEF, 0xBB, 0xBF] {
+            start = 3;
+        }
+        lines.push((line_no, raw[start..end].to_vec()));
+    }
+
+    lines
+        .par_iter()
+        .map(|(line, content)| {
+            if content.len() > DEFAULT_MAX_LINE_LENGTH {
+                return Err(JsonlError {
+                    line: *line,
+                    kind: JsonlErrorKind::LineTooLong {
+                        limit: DEFAULT_MAX_LINE_LENGTH,
+                    },
+                });
+            }
+            let mut buf = content.clone();
+            parse_line(&mut buf)
+                .map_err(|e| JsonlError {
+                    line: *line,
+                    kind: JsonlErrorKind::Json(e),
+                })
+        })
+        .collect()
+}
+
 /// A streaming JSON Lines writer.
 ///
 /// Wraps any [`Write`] and emits one JSON value per line. Each call to
@@ -828,6 +965,38 @@ mod tests {
     }
 
     #[test]
+    fn byte_offset_tracks_consumed_bytes() {
+        let data = b"{\"a\":1}\n{\"b\":2}\n{\"c\":3}\n";
+        let mut reader = parse_jsonl(BufReader::new(data.as_slice()));
+        assert_eq!(reader.byte_offset(), 0);
+        reader.next().unwrap().unwrap();
+        assert_eq!(reader.byte_offset(), 8); // length of `{"a":1}\n`
+        reader.next().unwrap().unwrap();
+        assert_eq!(reader.byte_offset(), 16);
+        reader.next().unwrap().unwrap();
+        assert_eq!(reader.byte_offset(), 24);
+        assert!(reader.next().is_none());
+        assert_eq!(reader.byte_offset(), 24);
+    }
+
+    #[test]
+    fn resume_at_continues_from_offset() {
+        use std::io::Cursor;
+        let data = b"{\"a\":1}\n{\"b\":2}\n{\"c\":3}\n".to_vec();
+        let mut reader = parse_jsonl(Cursor::new(data.clone()));
+        reader.next().unwrap().unwrap();
+        let offset = reader.byte_offset();
+        // Simulate a crash: recreate the reader on the same backing data, then
+        // resume from the persisted offset.
+        let mut reader = parse_jsonl(Cursor::new(data));
+        reader.resume_at(offset).unwrap();
+        let rest: Vec<serde_json::Value> = reader.collect::<Result<_, _>>().unwrap();
+        assert_eq!(rest.len(), 2);
+        assert_eq!(rest[0]["b"], 2);
+        assert_eq!(rest[1]["c"], 3);
+    }
+
+    #[test]
     fn no_trailing_newline() {
         let vals = read_all(b"{\"x\":42}");
         assert_eq!(vals.len(), 1);
@@ -996,6 +1165,31 @@ mod tests {
         let mut writer = JsonlWriter::new(&mut buf);
         writer.write(&serde_json::json!({"ok": true})).unwrap();
         assert_eq!(writer.line_number(), 1);
+    }
+
+    #[cfg(feature = "rayon")]
+    #[test]
+    fn parallel_parser_collects_all_records_in_order() {
+        let data = b"{\"x\":1}\n\n{\"x\":2}\n{\"x\":3}\n";
+        let values = parse_jsonl_parallel(BufReader::new(data.as_slice()));
+        assert_eq!(values.len(), 3);
+        let values: Vec<serde_json::Value> =
+            values.into_iter().collect::<Result<_, _>>().unwrap();
+        assert_eq!(values[0]["x"], 1);
+        assert_eq!(values[2]["x"], 3);
+    }
+
+    #[cfg(feature = "rayon")]
+    #[test]
+    fn parallel_parser_preserves_line_numbers_and_errors() {
+        let data = b"{\"a\":1}\nNOT_JSON\n{\"c\":3}\n";
+        let results = parse_jsonl_parallel(BufReader::new(data.as_slice()));
+        // Line 1 OK, line 2 malformed (with its original line number), line 3 OK.
+        assert!(results[0].is_ok());
+        let err = results[1].as_ref().unwrap_err();
+        assert_eq!(err.line, 2);
+        assert!(matches!(err.kind, JsonlErrorKind::Json(_)));
+        assert!(results[2].is_ok());
     }
 
     #[cfg(feature = "tokio")]

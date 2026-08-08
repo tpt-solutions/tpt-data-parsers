@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 20ea117f7f781c8018ba155f44efb4df8f8a03e3b7a760e21a15a3c3af6d17ac # shrinks to geom = Point { coordinates: Position([0.0, 0.0, 1596.0803747962339]) }
+cc 399545b6d7497c7430c25547fb548c57d71e2c2a4a6ef7fa3d5a3365f4bf1ed8 # shrinks to geom = LineString { coordinates: [Position([-97.74065465278929, 0.0]), Position([0.0, 0.0])] }
