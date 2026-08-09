@@ -47,7 +47,14 @@ and this crate adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.h
 
 ## [0.2.0] - 2026-08-08
 
-Initial published release.
+### Added
+
+- `format_pair` and `write_logfmt` for serializing `key=value` pairs back into logfmt
+  form, quoting and escaping keys/values as needed.
+
+## [0.1.0] - 2026-07-17
+
+Initial release.
 
 ### Added
 

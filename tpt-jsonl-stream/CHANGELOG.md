@@ -40,7 +40,11 @@ and this crate adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.h
 
 ## [0.2.0] - 2026-08-08
 
-Initial published release.
+No public API changes — added Criterion benchmarks and `docs.rs` all-features metadata.
+
+## [0.1.0] - 2026-07-17
+
+Initial release.
 
 ### Added
 

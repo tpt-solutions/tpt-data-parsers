@@ -38,7 +38,14 @@ and this crate adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.h
 
 ## [0.2.0] - 2026-08-08
 
-Initial published release.
+### Added
+
+- `CronExpr::upcoming` (behind the optional `chrono` feature), returning an `Upcoming`
+  iterator over successive firing times strictly after a starting point.
+
+## [0.1.0] - 2026-07-17
+
+Initial release.
 
 ### Added
 
