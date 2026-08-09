@@ -11,8 +11,11 @@ readme = "README.md"
 publish = false
 
 [dependencies]
-clap = { version = "4.4", features = ["derive"] }
-clap_complete = "4.4"
+# Capped below 4.6: clap 4.6+ requires the Rust 2024 edition, which the 1.71 MSRV
+# toolchain cannot parse. This keeps the `msrv` CI job (and the no_std libs'
+# 1.71 guarantee) green while still tracking 4.5.x security fixes.
+clap = { version = ">=4.5, <4.6", features = ["derive"] }
+clap_complete = ">=4.5, <4.6"
 chrono = "0.4"
 serde_json = { workspace = true }
 tpt-jsonl-stream = { path = "../tpt-jsonl-stream" }

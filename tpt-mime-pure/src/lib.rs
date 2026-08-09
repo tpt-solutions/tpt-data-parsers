@@ -240,11 +240,12 @@ impl MimeType {
 /// length and how tightly it is anchored.
 ///
 /// Short signatures that occur naturally in ordinary text or other binary
-/// formats (e.g. `BM` for BMP, `MZ` for EXE, `1F 8B` for gzip) earn [`Low`],
-/// because they produce frequent false positives on untrusted input. Long or
-/// compound/anchored signatures (e.g. the ISO-BMFF `ftyp` brand scan, the
-/// EBML `DocType` walk, a ZIP entry-name lookup, or an 8-byte PNG magic)
-/// earn [`High`]. Text/markup fallbacks are always [`Low`] because any valid
+/// formats (e.g. `BM` for BMP, `MZ` for EXE, `1F 8B` for gzip) earn
+/// [`Confidence::Low`], because they produce frequent false positives on
+/// untrusted input. Long or compound/anchored signatures (e.g. the ISO-BMFF
+/// `ftyp` brand scan, the EBML `DocType` walk, a ZIP entry-name lookup, or an
+/// 8-byte PNG magic) earn [`Confidence::High`]. Text/markup fallbacks are always
+/// [`Confidence::Low`] because any valid
 /// UTF-8 buffer can be misread as `text/plain`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Confidence {
