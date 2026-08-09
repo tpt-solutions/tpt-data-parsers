@@ -7,6 +7,8 @@ and this crate adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.h
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-09
+
 ### Added
 
 - `GeoJson::validate`, `Geometry::validate`, and `Feature::validate` re-run the full

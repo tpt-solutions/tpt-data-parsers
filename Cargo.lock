@@ -1047,7 +1047,7 @@ dependencies = [
 
 [[package]]
 name = "tpt-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "clap",
@@ -1062,7 +1062,7 @@ dependencies = [
 
 [[package]]
 name = "tpt-cron-parse"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "criterion",
@@ -1070,7 +1070,7 @@ dependencies = [
 
 [[package]]
 name = "tpt-geo-geojson"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "criterion",
  "proptest",
@@ -1080,7 +1080,7 @@ dependencies = [
 
 [[package]]
 name = "tpt-jsonl-stream"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "criterion",
  "proptest",
@@ -1093,7 +1093,7 @@ dependencies = [
 
 [[package]]
 name = "tpt-logfmt-parse"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "criterion",
  "proptest",
@@ -1101,7 +1101,7 @@ dependencies = [
 
 [[package]]
 name = "tpt-mime-pure"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "criterion",
 ]
