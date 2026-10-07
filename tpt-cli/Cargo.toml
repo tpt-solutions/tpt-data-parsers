@@ -15,7 +15,7 @@ publish = false
 # toolchain cannot parse. This keeps the `msrv` CI job (and the no_std libs'
 # 1.71 guarantee) green while still tracking 4.5.x security fixes.
 clap = { version = ">=4.5, <4.6", features = ["derive"] }
-clap_complete = ">=4.5, <4.6"
+clap_complete = ">=4.5, <4.7"
 chrono = "0.4"
 serde_json = { workspace = true }
 tpt-jsonl-stream = { path = "../tpt-jsonl-stream" }
