@@ -1,0 +1,18 @@
+[package]
+name = "tpt-data-parsers-testkit"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Golden and fuzz tests for the parser crates, built on tpt-testkit. Kept outside the workspace so the 1.71 MSRV job and the published crates never see tpt-testkit."
+
+# Detached from the parent workspace on purpose (see the root `exclude`).
+[workspace]
+
+[dev-dependencies]
+serde_json = "1"
+tpt-cron-parse = { path = "../tpt-cron-parse" }
+tpt-geo-geojson = { path = "../tpt-geo-geojson" }
+tpt-jsonl-stream = { path = "../tpt-jsonl-stream" }
+tpt-logfmt-parse = { path = "../tpt-logfmt-parse" }
+tpt-mime-pure = { path = "../tpt-mime-pure" }
+tpt-testkit = { git = "https://github.com/tpt-solutions/tpt-testkit", branch = "master", features = ["fuzz"] }

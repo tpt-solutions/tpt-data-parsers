@@ -1,0 +1,10 @@
+png: Some(Png)
+pdf: Some(Pdf)
+gzip: Some(Gzip)
+jpeg: Some(Jpeg)
+text: Some(Text)
+empty: None
+.png: Some(Png)
+.pdf: Some(Pdf)
+.json: Some(Json)
+.nope: None

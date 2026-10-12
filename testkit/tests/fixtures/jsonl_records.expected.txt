@@ -1,0 +1,8 @@
+0: {"active":true,"id":0,"name":"item_0","value":0}
+1: {"active":false,"id":1,"name":"item_1","value":1.5}
+2: {"active":true,"id":2,"name":"item_2","value":3}
+3: {"active":false,"id":3,"name":"item_3","value":4.5}
+4: {"active":true,"id":4,"name":"item_4","value":6}
+broken 0: {"a":1}
+broken 1: error: jsonl error on line 2: JSON error: key must be a string at line 1 column 2
+broken 2: [1,2]

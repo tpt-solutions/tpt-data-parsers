@@ -1,0 +1,4 @@
+valid: valid
+{"type":"FeatureCollection","features":[{"type":"Feature","geometry":{"type":"Point","coordinates":[125.6,10.1]},"properties":{"name":"Dinagat Islands"}},{"type":"Feature","geometry":{"type":"Polygon","coordinates":[[[100.0,0.0],[101.0,0.0],[101.0,1.0],[100.0,1.0],[100.0,0.0]]]},"properties":{"name":"Test Polygon"}},{"type":"Feature","geometry":{"type":"LineString","coordinates":[[0.0,0.0],[1.0,1.0],[2.0,2.0]]},"properties":null}]}
+malformed_coords: parse error: geojson error at coordinates: malformed coordinates: position must have 2 or 3 elements, got 4
+unclosed_polygon: parse error: geojson error at coordinates[0]: invalid ring: polygon ring is not closed (first position != last position)
