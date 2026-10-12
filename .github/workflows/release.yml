@@ -51,13 +51,13 @@ jobs:
 
       - name: Upload release asset (unix)
         if: runner.os != 'Windows' && github.event_name == 'release'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: tpt-cli-${{ matrix.target }}.tar.gz
 
       - name: Upload release asset (windows)
         if: runner.os == 'Windows' && github.event_name == 'release'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: tpt-cli-${{ matrix.target }}.zip
 
