@@ -26,3 +26,7 @@ Thumbs.db
 
 # Kilo planning artifacts (local, not project code)
 .kilo/
+
+# tpt-testkit crate (detached from the workspace)
+/testkit/target/
+/testkit/Cargo.lock

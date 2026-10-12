@@ -8,6 +8,7 @@ members = [
     "tpt-cli",
 ]
 exclude = [
+    "testkit",
     "tpt-jsonl-stream/fuzz",
     "tpt-geo-geojson/fuzz",
     "tpt-logfmt-parse/fuzz",

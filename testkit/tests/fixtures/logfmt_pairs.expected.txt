@@ -1,0 +1,5 @@
+level=info msg="hello world" count=3 => [("level", "info"), ("msg", "hello world"), ("count", "3")]
+bare key=value => [("bare", ""), ("key", "value")]
+msg="escaped \" quote" empty= => [("msg", "escaped \" quote"), ("empty", "")]
+=novalue => error: logfmt parse error at position 0: expected key
+unterminated="oops => error: logfmt parse error at position 18: unterminated quoted string

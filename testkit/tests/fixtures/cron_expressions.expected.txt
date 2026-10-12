@@ -1,0 +1,8 @@
+"* * * * *" => Every minute
+"*/15 0 1,15 * 1-5" => At */15 past 0on 1,15 of * (1-5)
+"0 0 1 1 *" => At 12:00 AM on January 1st
+"30 4 * * 0" => Every Sunday at 4:30 AM
+"0 */2 * * * *" => At */2 past *0 on * of * (*)
+"61 * * * *" => error: cron parse error in minutes field at position 0: expected value 0-59, found '6'
+"* * *" => error: cron parse error in minutes field at position 0: expected 5 or 6 whitespace-separated fields, found end of input
+"" => error: cron parse error in minutes field at position 0: expected 5 or 6 whitespace-separated fields, found end of input
